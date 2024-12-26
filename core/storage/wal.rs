@@ -141,8 +141,18 @@ impl Wal for WalFile {
         Ok(())
     }
 
+    /// Begin a write transaction
+    fn begin_write_tx(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// End a read transaction.
     fn end_read_tx(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// End a write transaction
+    fn end_write_tx(&self) -> Result<()> {
         Ok(())
     }
 
@@ -218,16 +228,6 @@ impl Wal for WalFile {
                 }
             }
         }
-        Ok(())
-    }
-
-    /// Begin a write transaction
-    fn begin_write_tx(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    /// End a write transaction
-    fn end_write_tx(&self) -> Result<()> {
         Ok(())
     }
 

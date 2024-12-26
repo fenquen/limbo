@@ -76,6 +76,7 @@ struct WriteInfo {
 
 pub struct BTreeCursor {
     pager: Rc<Pager>,
+
     /// Page id of the root page used to go back up fast.
     root_page: usize,
     /// Rowid and record are stored before being consumed.
@@ -101,8 +102,10 @@ pub struct BTreeCursor {
 struct PageStack {
     /// Pointer to the currenet page being consumed
     current_page: RefCell<i32>,
+
     /// List of pages in the stack. Root page will be in index 0
     stack: RefCell<[Option<PageRef>; BTCURSOR_MAX_DEPTH + 1]>,
+
     /// List of cell indices in the stack.
     /// cell_indices[current_page] is the current cell index being consumed. Similarly
     /// cell_indices[current_page-1] is the cell index of the parent of the current page
@@ -114,11 +117,9 @@ struct PageStack {
 }
 
 impl BTreeCursor {
-    pub fn new(
-        pager: Rc<Pager>,
-        root_page: usize,
-        database_header: Rc<RefCell<DatabaseHeader>>,
-    ) -> Self {
+    pub fn new(pager: Rc<Pager>,
+               root_page: usize,
+               database_header: Rc<RefCell<DatabaseHeader>>) -> Self {
         Self {
             pager,
             root_page,
@@ -205,9 +206,9 @@ impl BTreeCursor {
 
             match cell {
                 BTreeCell::TableInteriorCell(TableInteriorCell {
-                    _left_child_page,
-                    _rowid,
-                }) => {
+                                                 _left_child_page,
+                                                 _rowid,
+                                             }) => {
                     let mem_page = self.pager.read_page(_left_child_page as usize)?;
                     self.stack.push(mem_page);
                     // use cell_index = i32::MAX to tell next loop to go to the end of the current page
@@ -215,8 +216,8 @@ impl BTreeCursor {
                     continue;
                 }
                 BTreeCell::TableLeafCell(TableLeafCell {
-                    _rowid, _payload, ..
-                }) => {
+                                             _rowid, _payload, ..
+                                         }) => {
                     self.stack.retreat();
                     let record: OwnedRecord =
                         crate::storage::sqlite3_ondisk::read_record(&_payload)?;
@@ -292,9 +293,9 @@ impl BTreeCursor {
             )?;
             match &cell {
                 BTreeCell::TableInteriorCell(TableInteriorCell {
-                    _left_child_page,
-                    _rowid,
-                }) => {
+                                                 _left_child_page,
+                                                 _rowid,
+                                             }) => {
                     assert!(predicate.is_none());
                     self.stack.advance();
                     let mem_page = self.pager.read_page(*_left_child_page as usize)?;
@@ -302,20 +303,20 @@ impl BTreeCursor {
                     continue;
                 }
                 BTreeCell::TableLeafCell(TableLeafCell {
-                    _rowid,
-                    _payload,
-                    first_overflow_page: _,
-                }) => {
+                                             _rowid,
+                                             _payload,
+                                             first_overflow_page: _,
+                                         }) => {
                     assert!(predicate.is_none());
                     self.stack.advance();
                     let record = crate::storage::sqlite3_ondisk::read_record(_payload)?;
                     return Ok(CursorResult::Ok((Some(*_rowid), Some(record))));
                 }
                 BTreeCell::IndexInteriorCell(IndexInteriorCell {
-                    payload,
-                    left_child_page,
-                    ..
-                }) => {
+                                                 payload,
+                                                 left_child_page,
+                                                 ..
+                                             }) => {
                     if !self.going_upwards {
                         let mem_page = self.pager.read_page(*left_child_page as usize)?;
                         self.stack.push(mem_page);
@@ -409,10 +410,10 @@ impl BTreeCursor {
                 )?;
                 match &cell {
                     BTreeCell::TableLeafCell(TableLeafCell {
-                        _rowid: cell_rowid,
-                        _payload: payload,
-                        first_overflow_page: _,
-                    }) => {
+                                                 _rowid: cell_rowid,
+                                                 _payload: payload,
+                                                 first_overflow_page: _,
+                                             }) => {
                         let SeekKey::TableRowId(rowid_key) = key else {
                             unreachable!("table seek key should be a rowid");
                         };
@@ -558,9 +559,9 @@ impl BTreeCursor {
                     self.usable_space(),
                 )? {
                     BTreeCell::TableInteriorCell(TableInteriorCell {
-                        _left_child_page,
-                        _rowid,
-                    }) => {
+                                                     _left_child_page,
+                                                     _rowid,
+                                                 }) => {
                         let SeekKey::TableRowId(rowid_key) = key else {
                             unreachable!("table seek key should be a rowid");
                         };
@@ -578,19 +579,19 @@ impl BTreeCursor {
                         }
                     }
                     BTreeCell::TableLeafCell(TableLeafCell {
-                        _rowid: _,
-                        _payload: _,
-                        first_overflow_page: _,
-                    }) => {
+                                                 _rowid: _,
+                                                 _payload: _,
+                                                 first_overflow_page: _,
+                                             }) => {
                         unreachable!(
                             "we don't iterate leaf cells while trying to move to a leaf cell"
                         );
                     }
                     BTreeCell::IndexInteriorCell(IndexInteriorCell {
-                        left_child_page,
-                        payload,
-                        ..
-                    }) => {
+                                                     left_child_page,
+                                                     payload,
+                                                     ..
+                                                 }) => {
                         let SeekKey::IndexKey(index_key) = key else {
                             unreachable!("index seek key should be a record");
                         };
@@ -1073,7 +1074,7 @@ impl BTreeCursor {
                         self.min_local(contents.page_type()),
                         self.usable_space(),
                     )
-                    .unwrap();
+                        .unwrap();
 
                     if is_leaf {
                         // create a new divider cell and push
@@ -1282,7 +1283,7 @@ impl BTreeCursor {
 
                 let size = match page_type {
                     PageType::TableInterior => {
-                        let (_, nr_key) = match read_varint(&read_buf[pc as usize ..]) {
+                        let (_, nr_key) = match read_varint(&read_buf[pc as usize..]) {
                             Ok(v) => v,
                             Err(_) => todo!(
                                 "error while parsing varint from cell, probably treat this as corruption?"
@@ -1659,19 +1660,6 @@ fn find_free_cell(page_ref: &PageContent, db_header: Ref<DatabaseHeader>, amount
 }
 
 impl Cursor for BTreeCursor {
-    fn seek_to_last(&mut self) -> Result<CursorResult<()>> {
-        return_if_io!(self.move_to_rightmost());
-        let (rowid, record) = return_if_io!(self.get_next_record(None));
-        if rowid.is_none() {
-            let is_empty = return_if_io!(self.is_empty_table());
-            assert!(is_empty);
-            return Ok(CursorResult::Ok(()));
-        }
-        self.rowid.replace(rowid);
-        self.record.replace(record);
-        Ok(CursorResult::Ok(()))
-    }
-
     fn is_empty(&self) -> bool {
         self.record.borrow().is_none()
     }
@@ -1730,6 +1718,19 @@ impl Cursor for BTreeCursor {
         Ok(CursorResult::Ok(rowid.is_some()))
     }
 
+    fn seek_to_last(&mut self) -> Result<CursorResult<()>> {
+        return_if_io!(self.move_to_rightmost());
+        let (rowid, record) = return_if_io!(self.get_next_record(None));
+        if rowid.is_none() {
+            let is_empty = return_if_io!(self.is_empty_table());
+            assert!(is_empty);
+            return Ok(CursorResult::Ok(()));
+        }
+        self.rowid.replace(rowid);
+        self.record.replace(record);
+        Ok(CursorResult::Ok(()))
+    }
+
     fn record(&self) -> Result<Ref<Option<OwnedRecord>>> {
         Ok(self.record.borrow())
     }
@@ -1751,14 +1752,6 @@ impl Cursor for BTreeCursor {
         return_if_io!(self.insert_into_page(key, _record));
         self.rowid.replace(Some(*int_key as u64));
         Ok(CursorResult::Ok(()))
-    }
-
-    fn set_null_flag(&mut self, flag: bool) {
-        self.null_flag = flag;
-    }
-
-    fn get_null_flag(&self) -> bool {
-        self.null_flag
     }
 
     fn exists(&mut self, key: &OwnedValue) -> Result<CursorResult<bool>> {
@@ -1794,6 +1787,14 @@ impl Cursor for BTreeCursor {
             };
             Ok(CursorResult::Ok(equals))
         }
+    }
+
+    fn set_null_flag(&mut self, flag: bool) {
+        self.null_flag = flag;
+    }
+
+    fn get_null_flag(&self) -> bool {
+        self.null_flag
     }
 
     fn btree_create(&mut self, flags: usize) -> u32 {

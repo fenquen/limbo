@@ -12,22 +12,21 @@ use crate::{
     translate::expr::translate_expr,
     vdbe::{builder::ProgramBuilder, Insn, Program},
 };
-use crate::{Connection, Result};
+use crate::{Conn, Result};
 
 #[allow(clippy::too_many_arguments)]
-pub fn translate_insert(
-    schema: &Schema,
-    with: &Option<With>,
-    or_conflict: &Option<ResolveType>,
-    tbl_name: &QualifiedName,
-    _columns: &Option<DistinctNames>,
-    body: &InsertBody,
-    _returning: &Option<Vec<ResultColumn>>,
-    database_header: Rc<RefCell<DatabaseHeader>>,
-    connection: Weak<Connection>,
-) -> Result<Program> {
+pub fn translate_insert(schema: &Schema,
+                        with: &Option<With>,
+                        or_conflict: &Option<ResolveType>,
+                        tbl_name: &QualifiedName,
+                        _columns: &Option<DistinctNames>,
+                        body: &InsertBody,
+                        _returning: &Option<Vec<ResultColumn>>,
+                        database_header: Rc<RefCell<DatabaseHeader>>,
+                        connection: Weak<Conn>) -> Result<Program> {
     assert!(with.is_none());
     assert!(or_conflict.is_none());
+
     let mut program = ProgramBuilder::new();
     let init_label = program.allocate_label();
     program.emit_insn_with_label_dependency(

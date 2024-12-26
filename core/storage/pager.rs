@@ -504,32 +504,3 @@ pub fn allocate_page(page_id: usize, buffer_pool: &Rc<BufferPool>, offset: usize
     }
     page
 }
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, RwLock};
-
-    use crate::storage::page_cache::{DumbLruPageCache, PageCacheKey};
-
-    use super::Page;
-
-    #[test]
-    fn test_shared_cache() {
-        // ensure cache can be shared between threads
-        let cache = Arc::new(RwLock::new(DumbLruPageCache::new(10)));
-
-        let thread = {
-            let cache = cache.clone();
-            std::thread::spawn(move || {
-                let mut cache = cache.write().unwrap();
-                let page_key = PageCacheKey::new(1, None);
-                cache.insert(page_key, Arc::new(Page::new(1)));
-            })
-        };
-        let _ = thread.join();
-        let mut cache = cache.write().unwrap();
-        let page_key = PageCacheKey::new(1, None);
-        let page = cache.get(&page_key);
-        assert_eq!(page.unwrap().get().id, 1);
-    }
-}

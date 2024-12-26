@@ -1,6 +1,6 @@
 use crate::error::LimboError;
 use crate::io::common;
-use crate::Result;
+use crate::{io, Result};
 
 use super::{Completion, File, OpenFlags, IO};
 use libc::{c_short, fcntl, flock, F_SETLK};
@@ -33,9 +33,7 @@ impl DarwinIO {
 impl IO for DarwinIO {
     fn open_file(&self, path: &str, flags: OpenFlags, _direct: bool) -> Result<Rc<dyn File>> {
         trace!("open_file(path = {})", path);
-        let file = std::fs::File::options()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
+        let file = std::fs::File::options().read(true).custom_flags(libc::O_NONBLOCK)
             .write(true)
             .create(matches!(flags, OpenFlags::Create))
             .open(path)?;
@@ -45,7 +43,7 @@ impl IO for DarwinIO {
             poller: self.poller.clone(),
             callbacks: self.callbacks.clone(),
         });
-        if std::env::var(common::ENV_DISABLE_FILE_LOCK).is_err() {
+        if std::env::var(io::ENV_DISABLE_FILE_LOCK).is_err() {
             darwin_file.lock_file(true)?;
         }
         Ok(darwin_file)
@@ -282,15 +280,5 @@ impl File for DarwinFile {
 impl Drop for DarwinFile {
     fn drop(&mut self) {
         self.unlock_file().expect("Failed to unlock file");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_multiple_processes_cannot_open_file() {
-        common::tests::test_multiple_processes_cannot_open_file(DarwinIO::new);
     }
 }

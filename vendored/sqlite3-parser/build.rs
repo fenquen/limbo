@@ -10,39 +10,30 @@ use uncased::UncasedStr;
 fn main() -> Result<()> {
     let out_dir = env::var("OUT_DIR").unwrap();
     let out_path = Path::new(&out_dir);
-    let rlemon = out_path.join("rlemon");
+    let rlemonExePath = out_path.join("rlemon");
 
-    let lemon_src_dir = Path::new("third_party").join("lemon");
-    let rlemon_src = lemon_src_dir.join("lemon.c");
+    let lemonCFilePath = Path::new("third_party").join("lemon").join("lemon.c");
 
-    // compile rlemon:
+    // gcc -o rlemon lemon.c 的
     {
-        assert!(Build::new()
-            .target(&env::var("HOST").unwrap())
-            .get_compiler()
-            .to_command()
-            .arg("-o")
-            .arg(rlemon.clone())
-            .arg(rlemon_src)
-            .status()?
-            .success());
+        assert!(Build::new().target(&env::var("HOST").unwrap()).get_compiler()
+            .to_command().arg("-o").arg(rlemonExePath.clone()).arg(lemonCFilePath).status()?.success());
     }
 
-    let sql_parser = "src/parser/parse.y";
-    // run rlemon / generate parser:
+    // lemon -DSQLITE_ENABLE_UPDATE_DELETE_LIMIT -Tlempar.rs  -d./  ../../src/parser/parse.y
     {
-        assert!(Command::new(rlemon)
+        assert!(Command::new(rlemonExePath)
             .arg("-DSQLITE_ENABLE_UPDATE_DELETE_LIMIT")
             .arg("-Tthird_party/lemon/lempar.rs")
             .arg(format!("-d{out_dir}"))
-            .arg(sql_parser)
+            .arg("src/parser/parse.y")
             .status()?
             .success());
         // TODO ./rlemon -m -Tthird_party/lemon/lempar.rs examples/simple.y
     }
 
-    let keywords = out_path.join("keywords.rs");
-    let mut keywords = BufWriter::new(File::create(keywords)?);
+    // 书写keyword.rs
+    let mut keywords = BufWriter::new(File::create(out_path.join("keywords.rs"))?);
     write!(
         &mut keywords,
         "static KEYWORDS: ::phf::Map<&'static UncasedStr, TokenType> = \n{};",
@@ -78,10 +69,7 @@ fn main() -> Result<()> {
             .entry(UncasedStr::new("CURRENT"), "TokenType::TK_CURRENT")
             .entry(UncasedStr::new("CURRENT_DATE"), "TokenType::TK_CTIME_KW")
             .entry(UncasedStr::new("CURRENT_TIME"), "TokenType::TK_CTIME_KW")
-            .entry(
-                UncasedStr::new("CURRENT_TIMESTAMP"),
-                "TokenType::TK_CTIME_KW"
-            )
+            .entry(UncasedStr::new("CURRENT_TIMESTAMP"), "TokenType::TK_CTIME_KW")
             .entry(UncasedStr::new("DATABASE"), "TokenType::TK_DATABASE")
             .entry(UncasedStr::new("DEFAULT"), "TokenType::TK_DEFAULT")
             .entry(UncasedStr::new("DEFERRABLE"), "TokenType::TK_DEFERRABLE")
@@ -135,10 +123,7 @@ fn main() -> Result<()> {
             .entry(UncasedStr::new("LIKE"), "TokenType::TK_LIKE_KW")
             .entry(UncasedStr::new("LIMIT"), "TokenType::TK_LIMIT")
             .entry(UncasedStr::new("MATCH"), "TokenType::TK_MATCH")
-            .entry(
-                UncasedStr::new("MATERIALIZED"),
-                "TokenType::TK_MATERIALIZED"
-            )
+            .entry(UncasedStr::new("MATERIALIZED"), "TokenType::TK_MATERIALIZED")
             .entry(UncasedStr::new("NATURAL"), "TokenType::TK_JOIN_KW")
             .entry(UncasedStr::new("NO"), "TokenType::TK_NO")
             .entry(UncasedStr::new("NOT"), "TokenType::TK_NOT")

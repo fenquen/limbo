@@ -1,49 +1,58 @@
+#![allow(non_snake_case)]
+
 mod app;
 mod opcodes_dictionary;
 
 use rustyline::{error::ReadlineError, DefaultEditor};
 use std::sync::atomic::Ordering;
+use crate::app::LimboCliApp;
 
 #[allow(clippy::arc_with_non_send_sync)]
 fn main() -> anyhow::Result<()> {
     env_logger::init();
-    let mut app = app::Limbo::new()?;
-    let mut rl = DefaultEditor::new()?;
-    let home = dirs::home_dir().expect("Could not determine home directory");
-    let history_file = home.join(".limbo_history");
-    if history_file.exists() {
-        rl.load_history(history_file.as_path())?;
+
+    let mut limboCliApp = LimboCliApp::new()?;
+
+    let mut rustyLineEditor = DefaultEditor::new()?;
+
+    let homeDirPath = dirs::home_dir().expect("Could not determine home directory");
+
+    let historyFile = homeDirPath.join(".limbo_history");
+    if historyFile.exists() {
+        rustyLineEditor.load_history(historyFile.as_path())?;
     }
+
     loop {
-        let readline = rl.readline(&app.prompt);
-        match readline {
-            Ok(line) => match app.handle_input_line(line.trim(), &mut rl) {
+        match  rustyLineEditor.readline(&limboCliApp.prompt) {
+            Ok(line) => match limboCliApp.processInputLine(line.trim(), &mut rustyLineEditor) {
                 Ok(_) => {}
-                Err(e) => {
-                    eprintln!("{}", e);
-                }
+                Err(e) => eprintln!("{}", e),
             },
             Err(ReadlineError::Interrupted) => {
                 // At prompt, increment interrupt count
-                if app.interrupt_count.fetch_add(1, Ordering::SeqCst) >= 1 {
+                if limboCliApp.interrupt_count.fetch_add(1, Ordering::SeqCst) >= 1 {
                     eprintln!("Interrupted. Exiting...");
-                    let _ = app.close_conn();
+                    let _ = limboCliApp.close_conn();
                     break;
                 }
+
                 println!("Use .quit to exit or press Ctrl-C again to force quit.");
-                app.reset_input();
+                limboCliApp.reset_input();
+
                 continue;
             }
             Err(ReadlineError::Eof) => {
-                let _ = app.close_conn();
+                let _ = limboCliApp.close_conn();
                 break;
             }
             Err(err) => {
-                let _ = app.close_conn();
+                let _ = limboCliApp.close_conn();
                 anyhow::bail!(err)
             }
         }
     }
-    rl.save_history(history_file.as_path())?;
+
+    rustyLineEditor.save_history(historyFile.as_path())?;
+
     Ok(())
 }

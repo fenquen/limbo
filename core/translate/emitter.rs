@@ -14,7 +14,7 @@ use crate::types::{OwnedRecord, OwnedValue};
 use crate::util::exprs_are_equivalent;
 use crate::vdbe::builder::ProgramBuilder;
 use crate::vdbe::{BranchOffset, Insn, Program};
-use crate::{Connection, Result};
+use crate::{Conn, Result};
 
 use super::expr::{
     translate_aggregation, translate_aggregation_groupby, translate_condition_expr, translate_expr,
@@ -165,7 +165,7 @@ fn epilogue(
 pub fn emit_program(
     database_header: Rc<RefCell<DatabaseHeader>>,
     mut plan: Plan,
-    connection: Weak<Connection>,
+    connection: Weak<Conn>,
 ) -> Result<Program> {
     let (mut program, mut metadata, init_label, start_offset) = prologue()?;
 

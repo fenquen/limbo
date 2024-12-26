@@ -1,4 +1,4 @@
-use limbo_core::{Connection, Database, File, OpenFlags, PlatformIO, Result, RowResult, IO};
+use limbo_core::{Conn, Database, File, OpenFlags, PlatformIO, Result, RowResult, IO};
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use std::cell::RefCell;
@@ -19,7 +19,7 @@ struct SimulatorEnv {
 
 #[derive(Clone)]
 enum SimConnection {
-    Connected(Rc<Connection>),
+    Connected(Rc<Conn>),
     Disconnected,
 }
 
@@ -152,7 +152,7 @@ fn main() {
     env.io.print_stats();
 }
 
-fn process_connection(env: &mut SimulatorEnv, conn: &mut Rc<Connection>) -> Result<()> {
+fn process_connection(env: &mut SimulatorEnv, conn: &mut Rc<Conn>) -> Result<()> {
     let management = env.rng.gen_ratio(1, 100);
     if management {
         // for now create table only
@@ -175,7 +175,7 @@ fn process_connection(env: &mut SimulatorEnv, conn: &mut Rc<Connection>) -> Resu
     Ok(())
 }
 
-fn do_select(env: &mut SimulatorEnv, conn: &mut Rc<Connection>) -> Result<()> {
+fn do_select(env: &mut SimulatorEnv, conn: &mut Rc<Conn>) -> Result<()> {
     let table = env.rng.gen_range(0..env.tables.len());
     let table_name = {
         let table = &env.tables[table];
@@ -188,7 +188,7 @@ fn do_select(env: &mut SimulatorEnv, conn: &mut Rc<Connection>) -> Result<()> {
     Ok(())
 }
 
-fn do_write(env: &mut SimulatorEnv, conn: &mut Rc<Connection>) -> Result<()> {
+fn do_write(env: &mut SimulatorEnv, conn: &mut Rc<Conn>) -> Result<()> {
     let mut query = String::new();
     let table = env.rng.gen_range(0..env.tables.len());
     {
@@ -233,7 +233,7 @@ fn compare_equal_rows(a: &[Vec<Value>], b: &[Vec<Value>]) {
     }
 }
 
-fn maybe_add_table(env: &mut SimulatorEnv, conn: &mut Rc<Connection>) -> Result<()> {
+fn maybe_add_table(env: &mut SimulatorEnv, conn: &mut Rc<Conn>) -> Result<()> {
     if env.tables.len() < env.opts.max_tables {
         let table = Table {
             rows: Vec::new(),
@@ -312,7 +312,7 @@ fn gen_columns(env: &mut SimulatorEnv) -> Vec<Column> {
 
 fn get_all_rows(
     env: &mut SimulatorEnv,
-    conn: &mut Rc<Connection>,
+    conn: &mut Rc<Conn>,
     query: &str,
 ) -> Result<Vec<Vec<Value>>> {
     log::info!("running query '{}'", &query[0..query.len().min(4096)]);

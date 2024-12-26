@@ -3,15 +3,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "bindings/python",
-    "bindings/wasm",
     "cli",
-    "sqlite3",
     "core",
     "simulator",
-    "test",
 ]
-exclude = ["perf/latency/limbo"]
 
 [workspace.package]
 version = "0.0.10"

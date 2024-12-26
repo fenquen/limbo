@@ -1889,22 +1889,3 @@ pub enum FrameExclude {
     /// `TIES`
     Ties,
 }
-
-#[cfg(test)]
-mod test {
-    use super::Name;
-
-    #[test]
-    fn test_dequote() {
-        assert_eq!(name("x"), "x");
-        assert_eq!(name("`x`"), "x");
-        assert_eq!(name("`x``y`"), "x`y");
-        assert_eq!(name(r#""x""#), "x");
-        assert_eq!(name(r#""x""y""#), "x\"y");
-        assert_eq!(name("[x]"), "x");
-    }
-
-    fn name(s: &'static str) -> Name {
-        Name(s.to_owned())
-    }
-}

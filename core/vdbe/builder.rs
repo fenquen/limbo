@@ -4,7 +4,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use crate::{storage::sqlite3_ondisk::DatabaseHeader, Connection};
+use crate::{storage::sqlite3_ondisk::DatabaseHeader, Conn};
 
 use super::{BranchOffset, CursorID, Insn, InsnReference, Program, Table};
 
@@ -365,7 +365,7 @@ impl ProgramBuilder {
     pub fn build(
         self,
         database_header: Rc<RefCell<DatabaseHeader>>,
-        connection: Weak<Connection>,
+        connection: Weak<Conn>,
     ) -> Program {
         assert!(
             self.deferred_label_resolutions.is_empty(),

@@ -9,6 +9,13 @@ use std::{
     rc::Rc,
 };
 
+pub trait IO {
+    fn open_file(&self, path: &str, flags: OpenFlags, direct: bool) -> Result<Rc<dyn File>>;
+    fn run_once(&self) -> Result<()>;
+    fn generate_random_number(&self) -> i64;
+    fn get_current_time(&self) -> String;
+}
+
 pub trait File {
     fn lock_file(&self, exclusive: bool) -> Result<()>;
     fn unlock_file(&self) -> Result<()>;
@@ -23,16 +30,6 @@ pub enum OpenFlags {
     Create,
 }
 
-pub trait IO {
-    fn open_file(&self, path: &str, flags: OpenFlags, direct: bool) -> Result<Rc<dyn File>>;
-
-    fn run_once(&self) -> Result<()>;
-
-    fn generate_random_number(&self) -> i64;
-
-    fn get_current_time(&self) -> String;
-}
-
 pub type Complete = dyn Fn(Rc<RefCell<Buffer>>);
 pub type WriteComplete = dyn Fn(i32);
 pub type SyncComplete = dyn Fn(i32);
@@ -41,11 +38,6 @@ pub enum Completion {
     Read(ReadCompletion),
     Write(WriteCompletion),
     Sync(SyncCompletion),
-}
-
-pub struct ReadCompletion {
-    pub buf: Rc<RefCell<Buffer>>,
-    pub complete: Box<Complete>,
 }
 
 impl Completion {
@@ -58,12 +50,9 @@ impl Completion {
     }
 }
 
-pub struct WriteCompletion {
-    pub complete: Box<WriteComplete>,
-}
-
-pub struct SyncCompletion {
-    pub complete: Box<SyncComplete>,
+pub struct ReadCompletion {
+    pub buf: Rc<RefCell<Buffer>>,
+    pub complete: Box<Complete>,
 }
 
 impl ReadCompletion {
@@ -84,6 +73,10 @@ impl ReadCompletion {
     }
 }
 
+pub struct WriteCompletion {
+    pub complete: Box<WriteComplete>,
+}
+
 impl WriteCompletion {
     pub fn new(complete: Box<WriteComplete>) -> Self {
         Self { complete }
@@ -92,6 +85,10 @@ impl WriteCompletion {
     pub fn complete(&self, bytes_written: i32) {
         (self.complete)(bytes_written);
     }
+}
+
+pub struct SyncCompletion {
+    pub complete: Box<SyncComplete>,
 }
 
 impl SyncCompletion {
@@ -174,11 +171,6 @@ cfg_block! {
         pub use darwin::DarwinIO as PlatformIO;
     }
 
-    #[cfg(target_os = "windows")] {
-        mod windows;
-        pub use windows::WindowsIO as PlatformIO;
-    }
-
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))] {
         mod generic;
         pub use generic::GenericIO as PlatformIO;
@@ -187,4 +179,5 @@ cfg_block! {
 
 mod memory;
 pub use memory::MemoryIO;
-mod common;
+
+pub const ENV_DISABLE_FILE_LOCK: &str = "LIMBO_DISABLE_FILE_LOCK";

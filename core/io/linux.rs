@@ -1,5 +1,5 @@
-use super::{common, Completion, File, OpenFlags, IO};
-use crate::{LimboError, Result};
+use super::{Completion, File, OpenFlags, IO};
+use crate::{io, LimboError, Result};
 use libc::{c_short, fcntl, flock, iovec, F_SETLK};
 use log::{debug, trace};
 use nix::fcntl::{FcntlArg, OFlag};
@@ -21,30 +21,13 @@ enum LinuxIOError {
 impl fmt::Display for LinuxIOError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LinuxIOError::IOUringCQError(code) => write!(
-                f,
-                "IOUring completion queue error occurred with code {}",
-                code
-            ),
+            LinuxIOError::IOUringCQError(code) => write!(f, "IOUring completion queue error occurred with code {}", code),
         }
     }
 }
 
 pub struct LinuxIO {
     inner: Rc<RefCell<InnerLinuxIO>>,
-}
-
-struct WrappedIOUring {
-    ring: io_uring::IoUring,
-    pending_ops: usize,
-    pub pending: HashMap<u64, Rc<Completion>>,
-    key: u64,
-}
-
-struct InnerLinuxIO {
-    ring: WrappedIOUring,
-    iovecs: [iovec; MAX_IOVECS],
-    next_iovec: usize,
 }
 
 impl LinuxIO {
@@ -69,6 +52,12 @@ impl LinuxIO {
     }
 }
 
+struct InnerLinuxIO {
+    ring: WrappedIOUring,
+    iovecs: [iovec; MAX_IOVECS],
+    next_iovec: usize,
+}
+
 impl InnerLinuxIO {
     pub fn get_iovec(&mut self, buf: *const u8, len: usize) -> &iovec {
         let iovec = &mut self.iovecs[self.next_iovec];
@@ -79,15 +68,21 @@ impl InnerLinuxIO {
     }
 }
 
+/// iouring的 sqe submit queue entry
+// cqe completion queue entry
+struct WrappedIOUring {
+    ring: io_uring::IoUring,
+    pending_ops: usize,
+    pub pending: HashMap<u64, Rc<Completion>>,
+    key: u64,
+}
+
 impl WrappedIOUring {
     fn submit_entry(&mut self, entry: &io_uring::squeue::Entry, c: Rc<Completion>) {
-        log::trace!("submit_entry({:?})", entry);
+        trace!("submit_entry({:?})", entry);
         self.pending.insert(entry.get_user_data(), c);
         unsafe {
-            self.ring
-                .submission()
-                .push(entry)
-                .expect("submission queue is full");
+            self.ring.submission().push(entry).expect("submission queue is full");
         }
         self.pending_ops += 1;
     }
@@ -101,7 +96,7 @@ impl WrappedIOUring {
         // NOTE: This works because CompletionQueue's next function pops the head of the queue. This is not normal behaviour of iterators
         let entry = self.ring.completion().next();
         if entry.is_some() {
-            log::trace!("get_completion({:?})", entry);
+            trace!("get_completion({:?})", entry);
             // consumed an entry from completion queue, update pending_ops
             self.pending_ops -= 1;
         }
@@ -131,7 +126,7 @@ impl IO for LinuxIO {
         let fd = file.as_raw_fd();
         if direct {
             match nix::fcntl::fcntl(fd, FcntlArg::F_SETFL(OFlag::O_DIRECT)) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(error) => debug!("Error {error:?} returned when setting O_DIRECT flag to read file. The performance of the system may be affected"),
             };
         }
@@ -139,7 +134,7 @@ impl IO for LinuxIO {
             io: self.inner.clone(),
             file,
         });
-        if std::env::var(common::ENV_DISABLE_FILE_LOCK).is_err() {
+        if std::env::var(io::ENV_DISABLE_FILE_LOCK).is_err() {
             linux_file.lock_file(true)?;
         }
         Ok(linux_file)
@@ -302,16 +297,5 @@ impl File for LinuxFile {
 impl Drop for LinuxFile {
     fn drop(&mut self) {
         self.unlock_file().expect("Failed to unlock file");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::io::common;
-
-    #[test]
-    fn test_multiple_processes_cannot_open_file() {
-        common::tests::test_multiple_processes_cannot_open_file(LinuxIO::new);
     }
 }

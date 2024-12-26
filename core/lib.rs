@@ -118,7 +118,7 @@ impl Database {
             buffer_pool,
         )?);
         let bootstrap_schema = Rc::new(RefCell::new(Schema::new()));
-        let conn = Rc::new(Connection {
+        let conn = Rc::new(Conn {
             pager: pager.clone(),
             schema: bootstrap_schema.clone(),
             header: db_header.clone(),
@@ -140,8 +140,8 @@ impl Database {
         }))
     }
 
-    pub fn connect(self: &Arc<Database>) -> Rc<Connection> {
-        Rc::new(Connection {
+    pub fn connect(self: &Arc<Database>) -> Rc<Conn> {
+        Rc::new(Conn {
             pager: self.pager.clone(),
             schema: self.schema.clone(),
             header: self.header.clone(),
@@ -200,7 +200,7 @@ pub fn maybe_init_database_file(file: &Rc<dyn File>, io: &Arc<dyn IO>) -> Result
     Ok(())
 }
 
-pub struct Connection {
+pub struct Conn {
     pager: Rc<Pager>,
     schema: Rc<RefCell<Schema>>,
     header: Rc<RefCell<DatabaseHeader>>,
@@ -208,8 +208,8 @@ pub struct Connection {
     last_insert_rowid: Cell<u64>,
 }
 
-impl Connection {
-    pub fn prepare(self: &Rc<Connection>, sql: impl Into<String>) -> Result<Statement> {
+impl Conn {
+    pub fn prepare(self: &Rc<Conn>, sql: impl Into<String>) -> Result<Statement> {
         let sql = sql.into();
         trace!("Preparing: {}", sql);
         let mut parser = Parser::new(sql.as_bytes());
@@ -234,33 +234,36 @@ impl Connection {
         }
     }
 
-    pub fn query(self: &Rc<Connection>, sql: impl Into<String>) -> Result<Option<Rows>> {
+    pub fn query(self: &Rc<Conn>, sql: impl Into<String>) -> Result<Option<Rows>> {
         let sql = sql.into();
         trace!("Querying: {}", sql);
+
         let mut parser = Parser::new(sql.as_bytes());
-        let cmd = parser.next()?;
-        if let Some(cmd) = cmd {
+
+        if let Some(cmd) = parser.next()? {
             match cmd {
                 Cmd::Stmt(stmt) => {
-                    let program = Rc::new(translate::translate(
-                        &self.schema.borrow(),
-                        stmt,
-                        self.header.clone(),
-                        self.pager.clone(),
-                        Rc::downgrade(self),
-                    )?);
+                    let program = Rc::new(
+                        translate::translate(&self.schema.borrow(),
+                                             stmt,
+                                             self.header.clone(),
+                                             self.pager.clone(),
+                                             Rc::downgrade(self))?
+                    );
+
                     let stmt = Statement::new(program, self.pager.clone());
+
                     Ok(Some(Rows { stmt }))
                 }
                 Cmd::Explain(stmt) => {
-                    let program = translate::translate(
-                        &self.schema.borrow(),
-                        stmt,
-                        self.header.clone(),
-                        self.pager.clone(),
-                        Rc::downgrade(self),
-                    )?;
+                    let program = translate::translate(&self.schema.borrow(),
+                                                       stmt,
+                                                       self.header.clone(),
+                                                       self.pager.clone(),
+                                                       Rc::downgrade(self))?;
+
                     program.explain();
+
                     Ok(None)
                 }
                 Cmd::ExplainQueryPlan(stmt) => {
@@ -280,7 +283,7 @@ impl Connection {
         }
     }
 
-    pub fn execute(self: &Rc<Connection>, sql: impl Into<String>) -> Result<()> {
+    pub fn execute(self: &Rc<Conn>, sql: impl Into<String>) -> Result<()> {
         let sql = sql.into();
         let mut parser = Parser::new(sql.as_bytes());
         let cmd = parser.next()?;

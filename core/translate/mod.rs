@@ -24,27 +24,19 @@ use crate::schema::Schema;
 use crate::storage::pager::Pager;
 use crate::storage::sqlite3_ondisk::{DatabaseHeader, MIN_PAGE_CACHE_SIZE};
 use crate::vdbe::{builder::ProgramBuilder, Insn, Program};
-use crate::{bail_parse_error, Connection, Result};
+use crate::{bail_parse_error, Conn, Result};
 use insert::translate_insert;
 use select::translate_select;
 use sqlite3_parser::ast::fmt::ToTokens;
 use sqlite3_parser::ast::{self, PragmaName};
 
-/// Translate SQL statement into bytecode program.
-pub fn translate(
-    schema: &Schema,
-    stmt: ast::Stmt,
-    database_header: Rc<RefCell<DatabaseHeader>>,
-    pager: Rc<Pager>,
-    connection: Weak<Connection>,
-) -> Result<Program> {
+/// Translate SQL statement into bytecode program
+pub fn translate(schema: &Schema,
+                 stmt: ast::Stmt,
+                 database_header: Rc<RefCell<DatabaseHeader>>,
+                 pager: Rc<Pager>,
+                 connection: Weak<Conn>) -> Result<Program> {
     match stmt {
-        ast::Stmt::AlterTable(_, _) => bail_parse_error!("ALTER TABLE not supported yet"),
-        ast::Stmt::Analyze(_) => bail_parse_error!("ANALYZE not supported yet"),
-        ast::Stmt::Attach { .. } => bail_parse_error!("ATTACH not supported yet"),
-        ast::Stmt::Begin(_, _) => bail_parse_error!("BEGIN not supported yet"),
-        ast::Stmt::Commit(_) => bail_parse_error!("COMMIT not supported yet"),
-        ast::Stmt::CreateIndex { .. } => bail_parse_error!("CREATE INDEX not supported yet"),
         ast::Stmt::CreateTable {
             temporary,
             if_not_exists,
@@ -54,6 +46,7 @@ pub fn translate(
             if temporary {
                 bail_parse_error!("TEMPORARY table not supported yet");
             }
+
             translate_create_table(
                 tbl_name,
                 body,
@@ -63,27 +56,6 @@ pub fn translate(
                 schema,
             )
         }
-        ast::Stmt::CreateTrigger { .. } => bail_parse_error!("CREATE TRIGGER not supported yet"),
-        ast::Stmt::CreateView { .. } => bail_parse_error!("CREATE VIEW not supported yet"),
-        ast::Stmt::CreateVirtualTable { .. } => {
-            bail_parse_error!("CREATE VIRTUAL TABLE not supported yet")
-        }
-        ast::Stmt::Delete { .. } => bail_parse_error!("DELETE not supported yet"),
-        ast::Stmt::Detach(_) => bail_parse_error!("DETACH not supported yet"),
-        ast::Stmt::DropIndex { .. } => bail_parse_error!("DROP INDEX not supported yet"),
-        ast::Stmt::DropTable { .. } => bail_parse_error!("DROP TABLE not supported yet"),
-        ast::Stmt::DropTrigger { .. } => bail_parse_error!("DROP TRIGGER not supported yet"),
-        ast::Stmt::DropView { .. } => bail_parse_error!("DROP VIEW not supported yet"),
-        ast::Stmt::Pragma(name, body) => {
-            translate_pragma(&name, body, database_header, pager, connection)
-        }
-        ast::Stmt::Reindex { .. } => bail_parse_error!("REINDEX not supported yet"),
-        ast::Stmt::Release(_) => bail_parse_error!("RELEASE not supported yet"),
-        ast::Stmt::Rollback { .. } => bail_parse_error!("ROLLBACK not supported yet"),
-        ast::Stmt::Savepoint(_) => bail_parse_error!("SAVEPOINT not supported yet"),
-        ast::Stmt::Select(select) => translate_select(schema, select, database_header, connection),
-        ast::Stmt::Update { .. } => bail_parse_error!("UPDATE not supported yet"),
-        ast::Stmt::Vacuum(_, _) => bail_parse_error!("VACUUM not supported yet"),
         ast::Stmt::Insert {
             with,
             or_conflict,
@@ -102,6 +74,29 @@ pub fn translate(
             database_header,
             connection,
         ),
+        ast::Stmt::Select(select) => translate_select(schema, select, database_header, connection),
+        ast::Stmt::Pragma(name, body) => translate_pragma(&name, body, database_header, pager, connection),
+        ast::Stmt::AlterTable(_, _) => bail_parse_error!("ALTER TABLE not supported yet"),
+        ast::Stmt::Analyze(_) => bail_parse_error!("ANALYZE not supported yet"),
+        ast::Stmt::Attach { .. } => bail_parse_error!("ATTACH not supported yet"),
+        ast::Stmt::Begin(_, _) => bail_parse_error!("BEGIN not supported yet"),
+        ast::Stmt::Commit(_) => bail_parse_error!("COMMIT not supported yet"),
+        ast::Stmt::CreateIndex { .. } => bail_parse_error!("CREATE INDEX not supported yet"),
+        ast::Stmt::CreateTrigger { .. } => bail_parse_error!("CREATE TRIGGER not supported yet"),
+        ast::Stmt::CreateView { .. } => bail_parse_error!("CREATE VIEW not supported yet"),
+        ast::Stmt::CreateVirtualTable { .. } => { bail_parse_error!("CREATE VIRTUAL TABLE not supported yet") }
+        ast::Stmt::Delete { .. } => bail_parse_error!("DELETE not supported yet"),
+        ast::Stmt::Detach(_) => bail_parse_error!("DETACH not supported yet"),
+        ast::Stmt::DropIndex { .. } => bail_parse_error!("DROP INDEX not supported yet"),
+        ast::Stmt::DropTable { .. } => bail_parse_error!("DROP TABLE not supported yet"),
+        ast::Stmt::DropTrigger { .. } => bail_parse_error!("DROP TRIGGER not supported yet"),
+        ast::Stmt::DropView { .. } => bail_parse_error!("DROP VIEW not supported yet"),
+        ast::Stmt::Reindex { .. } => bail_parse_error!("REINDEX not supported yet"),
+        ast::Stmt::Release(_) => bail_parse_error!("RELEASE not supported yet"),
+        ast::Stmt::Rollback { .. } => bail_parse_error!("ROLLBACK not supported yet"),
+        ast::Stmt::Savepoint(_) => bail_parse_error!("SAVEPOINT not supported yet"),
+        ast::Stmt::Update { .. } => bail_parse_error!("UPDATE not supported yet"),
+        ast::Stmt::Vacuum(_, _) => bail_parse_error!("VACUUM not supported yet"),
     }
 }
 
@@ -149,7 +144,7 @@ fn translate_create_table(
     body: ast::CreateTableBody,
     if_not_exists: bool,
     database_header: Rc<RefCell<DatabaseHeader>>,
-    connection: Weak<Connection>,
+    connection: Weak<Conn>,
     schema: &Schema,
 ) -> Result<Program> {
     let mut program = ProgramBuilder::new();
@@ -292,7 +287,7 @@ fn translate_pragma(
     body: Option<ast::PragmaBody>,
     database_header: Rc<RefCell<DatabaseHeader>>,
     pager: Rc<Pager>,
-    connection: Weak<Connection>,
+    connection: Weak<Conn>,
 ) -> Result<Program> {
     let mut program = ProgramBuilder::new();
     let init_label = program.allocate_label();

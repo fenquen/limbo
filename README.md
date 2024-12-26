@@ -1,24 +1,5 @@
 <p align="center">
-  <img src="limbo.png" alt="Limbo" width="200"/>
-  <h1 align="center">Limbo</h1>
-</p>
-
-<p align="center">
   Limbo is a work-in-progress, in-process OLTP database management system, compatible with SQLite.
-</p>
-
-<p align="center">
-  <a href="https://github.com/penberg/limbo/actions">
-    <img src="https://github.com/penberg/limbo/actions/workflows/rust.yml/badge.svg" alt="Build badge">
-  </a>
-  <a href="https://github.com/penberg/limbo/blob/main/LICENSE.md">
-    <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT" title="MIT License" />
-  </a>
-  <a href="https://discord.gg/jgjmyYgHwB">
-    <img src="https://img.shields.io/discord/1258658826257961020" alt="Discord" title="Discord" />
-  </a>
-  
-
 </p>
 
 ---
@@ -148,10 +129,43 @@ We'd love to have you contribute to Limbo! Check out the [contribution guide] to
 This project is licensed under the [MIT license].
 
 ### Contribution
-
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in Limbo by you, shall be licensed as MIT, without any additional
-terms or conditions.
-
 [contribution guide]: https://github.com/penberg/limbo/blob/main/CONTRIBUTING.md
-[MIT license]: https://github.com/penberg/limbo/blob/main/LICENSE.md
+
+The following sequence diagram shows the typical flow of a query from the CLI to the [VDBE](https://www.sqlite.org/opcode.html).
+
+```mermaid
+sequenceDiagram
+
+participant main as cli/main
+participant Database as core/lib/Database
+participant Connection as core/lib/Connection
+participant Parser as sql/mod/Parser
+participant translate as translate/mod
+participant Statement as core/lib/Statement
+participant Program as vdbe/mod/Program
+
+main->>Database: open_file
+Database->>main: Connection
+main->>Connection: query(sql)
+Note left of Parser: Parser uses vendored sqlite3-parser
+Connection->>Parser: next()
+Note left of Parser: Passes the SQL query to Parser
+
+Parser->>Connection: Cmd::Stmt (ast/mod.rs)
+
+Note right of translate: Translates SQL statement into bytecode
+Connection->>translate:translate(stmt)
+
+translate->>Connection: Program 
+
+Connection->>main: Ok(Some(Rows { Statement }))
+
+note right of main: a Statement with <br />a reference to Program is returned
+
+main->>Statement: step()
+Statement->>Program: step()
+Note left of Program: Program executes bytecode instructions<br />See https://www.sqlite.org/opcode.html
+Program->>Statement: StepResult
+Statement->>main: StepResult
+```
+
