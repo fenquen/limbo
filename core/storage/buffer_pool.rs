@@ -2,30 +2,32 @@ use crate::io::BufferData;
 use std::cell::RefCell;
 use std::pin::Pin;
 
+/// 以page的大小为粒度的
 pub struct BufferPool {
-    pub free_buffers: RefCell<Vec<BufferData>>,
-    page_size: usize,
+    pub availBuffers: RefCell<Vec<BufferData>>,
+    /// bufferSize用的是page大小相同
+    bufferSize: usize,
 }
 
 impl BufferPool {
-    pub fn new(page_size: usize) -> Self {
+    pub fn new(bufferSize: usize) -> Self {
         Self {
-            free_buffers: RefCell::new(Vec::new()),
-            page_size,
+            availBuffers: RefCell::new(Vec::new()),
+            bufferSize,
         }
     }
 
     pub fn get(&self) -> BufferData {
-        let mut free_buffers = self.free_buffers.borrow_mut();
+        let mut free_buffers = self.availBuffers.borrow_mut();
         if let Some(buffer) = free_buffers.pop() {
             buffer
         } else {
-            Pin::new(vec![0; self.page_size])
+            Pin::new(vec![0; self.bufferSize])
         }
     }
 
     pub fn put(&self, buffer: BufferData) {
-        let mut free_buffers = self.free_buffers.borrow_mut();
+        let mut free_buffers = self.availBuffers.borrow_mut();
         free_buffers.push(buffer);
     }
 }

@@ -5,7 +5,7 @@ pub enum LimboError {
     #[error("Corrupt database: {0}")]
     Corrupt(String),
     #[error("File is not a database")]
-    NotADB,
+    NotDbFile,
     #[error("Internal error: {0}")]
     InternalError(String),
     #[error("Parse error: {0}")]

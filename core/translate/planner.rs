@@ -1,7 +1,7 @@
 use super::{
     optimizer::Optimizable,
     plan::{
-        Aggregate, BTreeTableReference, Direction, GroupBy, Plan, ResultSetColumn, SourceOperator,
+        Aggregate, BTreeTableRef, Direction, GroupBy, Plan, ResultSetColumn, SrcOperator,
     },
 };
 use crate::{function::Func, schema::Schema, util::normalize_ident, Result};
@@ -15,6 +15,7 @@ impl OperatorIdCounter {
     pub fn new() -> Self {
         Self { id: 1 }
     }
+
     pub fn get_next_id(&mut self) -> usize {
         let id = self.id;
         self.id += 1;
@@ -85,35 +86,34 @@ fn resolve_aggregates(expr: &ast::Expr, aggs: &mut Vec<Aggregate>) -> bool {
 
 /// Recursively resolve column references in an expression.
 /// Id, Qualified and DoublyQualified are converted to Column.
-fn bind_column_references(
-    expr: &mut ast::Expr,
-    referenced_tables: &[BTreeTableReference],
-) -> Result<()> {
+fn bindColRef(expr: &mut ast::Expr, refTbls: &[BTreeTableRef]) -> Result<()> {
     match expr {
+        // id 是 literal 意义 对应 select a from table 的 a
         ast::Expr::Id(id) => {
             // true and false are special constants that are effectively aliases for 1 and 0
             // and not identifiers of columns
             if id.0.eq_ignore_ascii_case("true") || id.0.eq_ignore_ascii_case("false") {
                 return Ok(());
             }
+
             let mut match_result = None;
-            for (tbl_idx, table) in referenced_tables.iter().enumerate() {
-                let col_idx = table
-                    .table
-                    .columns
-                    .iter()
-                    .position(|c| c.name.eq_ignore_ascii_case(&id.0));
-                if col_idx.is_some() {
+
+            for (tblIndex, tblRef) in refTbls.iter().enumerate() {
+                let colIndex = tblRef.table.columns.iter().position(|c| c.name.eq_ignore_ascii_case(&id.0));
+                if colIndex.is_some() {
                     if match_result.is_some() {
-                        crate::bail_parse_error!("Column {} is ambiguous", id.0);
+                        crate::bail_parse_error!("column {} is ambiguous", id.0);
                     }
-                    let col = table.table.columns.get(col_idx.unwrap()).unwrap();
-                    match_result = Some((tbl_idx, col_idx.unwrap(), col.primary_key));
+
+                    let col = tblRef.table.columns.get(colIndex.unwrap()).unwrap();
+                    match_result = Some((tblIndex, colIndex.unwrap(), col.primary_key));
                 }
             }
+
             if match_result.is_none() {
                 crate::bail_parse_error!("Column {} not found", id.0);
             }
+
             let (tbl_idx, col_idx, is_primary_key) = match_result.unwrap();
             *expr = ast::Expr::Column {
                 database: None, // TODO: support different databases
@@ -121,17 +121,18 @@ fn bind_column_references(
                 column: col_idx,
                 is_rowid_alias: is_primary_key,
             };
+
             Ok(())
         }
         ast::Expr::Qualified(tbl, id) => {
-            let matching_tbl_idx = referenced_tables
+            let matching_tbl_idx = refTbls
                 .iter()
                 .position(|t| t.table_identifier.eq_ignore_ascii_case(&tbl.0));
             if matching_tbl_idx.is_none() {
                 crate::bail_parse_error!("Table {} not found", tbl.0);
             }
             let tbl_idx = matching_tbl_idx.unwrap();
-            let col_idx = referenced_tables[tbl_idx]
+            let col_idx = refTbls[tbl_idx]
                 .table
                 .columns
                 .iter()
@@ -139,7 +140,7 @@ fn bind_column_references(
             if col_idx.is_none() {
                 crate::bail_parse_error!("Column {} not found", id.0);
             }
-            let col = referenced_tables[tbl_idx]
+            let col = refTbls[tbl_idx]
                 .table
                 .columns
                 .get(col_idx.unwrap())
@@ -158,14 +159,14 @@ fn bind_column_references(
             start,
             end,
         } => {
-            bind_column_references(lhs, referenced_tables)?;
-            bind_column_references(start, referenced_tables)?;
-            bind_column_references(end, referenced_tables)?;
+            bindColRef(lhs, refTbls)?;
+            bindColRef(start, refTbls)?;
+            bindColRef(end, refTbls)?;
             Ok(())
         }
         ast::Expr::Binary(expr, _operator, expr1) => {
-            bind_column_references(expr, referenced_tables)?;
-            bind_column_references(expr1, referenced_tables)?;
+            bindColRef(expr, refTbls)?;
+            bindColRef(expr1, refTbls)?;
             Ok(())
         }
         ast::Expr::Case {
@@ -174,19 +175,19 @@ fn bind_column_references(
             else_expr,
         } => {
             if let Some(base) = base {
-                bind_column_references(base, referenced_tables)?;
+                bindColRef(base, refTbls)?;
             }
             for (when, then) in when_then_pairs {
-                bind_column_references(when, referenced_tables)?;
-                bind_column_references(then, referenced_tables)?;
+                bindColRef(when, refTbls)?;
+                bindColRef(then, refTbls)?;
             }
             if let Some(else_expr) = else_expr {
-                bind_column_references(else_expr, referenced_tables)?;
+                bindColRef(else_expr, refTbls)?;
             }
             Ok(())
         }
-        ast::Expr::Cast { expr, type_name: _ } => bind_column_references(expr, referenced_tables),
-        ast::Expr::Collate(expr, _string) => bind_column_references(expr, referenced_tables),
+        ast::Expr::Cast { expr, type_name: _ } => bindColRef(expr, refTbls),
+        ast::Expr::Collate(expr, _string) => bindColRef(expr, refTbls),
         ast::Expr::FunctionCall {
             name: _,
             distinctness: _,
@@ -196,7 +197,7 @@ fn bind_column_references(
         } => {
             if let Some(args) = args {
                 for arg in args {
-                    bind_column_references(arg, referenced_tables)?;
+                    bindColRef(arg, refTbls)?;
                 }
             }
             Ok(())
@@ -207,10 +208,10 @@ fn bind_column_references(
         ast::Expr::Exists(_) => todo!(),
         ast::Expr::FunctionCallStar { .. } => Ok(()),
         ast::Expr::InList { lhs, not: _, rhs } => {
-            bind_column_references(lhs, referenced_tables)?;
+            bindColRef(lhs, refTbls)?;
             if let Some(rhs) = rhs {
                 for arg in rhs {
-                    bind_column_references(arg, referenced_tables)?;
+                    bindColRef(arg, refTbls)?;
                 }
             }
             Ok(())
@@ -218,30 +219,30 @@ fn bind_column_references(
         ast::Expr::InSelect { .. } => todo!(),
         ast::Expr::InTable { .. } => todo!(),
         ast::Expr::IsNull(expr) => {
-            bind_column_references(expr, referenced_tables)?;
+            bindColRef(expr, refTbls)?;
             Ok(())
         }
         ast::Expr::Like { lhs, rhs, .. } => {
-            bind_column_references(lhs, referenced_tables)?;
-            bind_column_references(rhs, referenced_tables)?;
+            bindColRef(lhs, refTbls)?;
+            bindColRef(rhs, refTbls)?;
             Ok(())
         }
         ast::Expr::Literal(_) => Ok(()),
         ast::Expr::Name(_) => todo!(),
         ast::Expr::NotNull(expr) => {
-            bind_column_references(expr, referenced_tables)?;
+            bindColRef(expr, refTbls)?;
             Ok(())
         }
         ast::Expr::Parenthesized(expr) => {
             for e in expr.iter_mut() {
-                bind_column_references(e, referenced_tables)?;
+                bindColRef(e, refTbls)?;
             }
             Ok(())
         }
         ast::Expr::Raise(_, _) => todo!(),
         ast::Expr::Subquery(_) => todo!(),
         ast::Expr::Unary(_, expr) => {
-            bind_column_references(expr, referenced_tables)?;
+            bindColRef(expr, refTbls)?;
             Ok(())
         }
         ast::Expr::Variable(_) => todo!(),
@@ -249,7 +250,7 @@ fn bind_column_references(
 }
 
 #[allow(clippy::extra_unused_lifetimes)]
-pub fn prepare_select_plan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> {
+pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> {
     match select.body.select {
         ast::OneSelect::Select {
             columns,
@@ -258,26 +259,24 @@ pub fn prepare_select_plan<'a>(schema: &Schema, select: ast::Select) -> Result<P
             mut group_by,
             ..
         } => {
-            let col_count = columns.len();
-            if col_count == 0 {
+            if columns.len() == 0 {
                 crate::bail_parse_error!("SELECT without columns is not allowed");
             }
 
             let mut operator_id_counter = OperatorIdCounter::new();
 
-            // Parse the FROM clause
             let (source, referenced_tables) = parse_from(schema, from, &mut operator_id_counter)?;
 
             let mut plan = Plan {
                 source,
                 result_columns: vec![],
-                where_clause: None,
+                whereExprs: None,
                 group_by: None,
-                order_by: None,
+                orderByExprs: None,
                 aggregates: vec![],
                 limit: None,
-                referenced_tables,
-                available_indexes: schema.indexes.clone().into_values().flatten().collect(),
+                refTbls: referenced_tables,
+                indexes: schema.indexes.clone().into_values().flatten().collect(),
                 contains_constant_false_condition: false,
             };
 
@@ -286,27 +285,25 @@ pub fn prepare_select_plan<'a>(schema: &Schema, select: ast::Select) -> Result<P
                 let mut predicates = vec![];
                 break_predicate_at_and_boundaries(w, &mut predicates);
                 for expr in predicates.iter_mut() {
-                    bind_column_references(expr, &plan.referenced_tables)?;
+                    bindColRef(expr, &plan.refTbls)?;
                 }
-                plan.where_clause = Some(predicates);
+                plan.whereExprs = Some(predicates);
             }
 
             let mut aggregate_expressions = Vec::new();
+
             for column in columns.clone() {
                 match column {
-                    ast::ResultColumn::Star => {
-                        plan.source.select_star(&mut plan.result_columns);
-                    }
-                    ast::ResultColumn::TableStar(name) => {
+                    ResultColumn::Star => plan.source.select_star(&mut plan.result_columns),
+                    ResultColumn::TableStar(name) => {
                         let name_normalized = normalize_ident(name.0.as_str());
-                        let referenced_table = plan
-                            .referenced_tables
-                            .iter()
-                            .find(|t| t.table_identifier == name_normalized);
+                        let referenced_table =
+                            plan.refTbls.iter().find(|t| t.table_identifier == name_normalized);
 
                         if referenced_table.is_none() {
                             crate::bail_parse_error!("Table {} not found", name.0);
                         }
+
                         let table_reference = referenced_table.unwrap();
                         for (idx, col) in table_reference.table.columns.iter().enumerate() {
                             plan.result_columns.push(ResultSetColumn {
@@ -320,25 +317,19 @@ pub fn prepare_select_plan<'a>(schema: &Schema, select: ast::Select) -> Result<P
                             });
                         }
                     }
-                    ast::ResultColumn::Expr(mut expr, _) => {
-                        bind_column_references(&mut expr, &plan.referenced_tables)?;
+                    // select a from table 的 a
+                    ResultColumn::Expr(mut expr, _) => {
+                        bindColRef(&mut expr, &plan.refTbls)?;
+
                         match &expr {
-                            ast::Expr::FunctionCall {
-                                name,
-                                distinctness: _,
-                                args,
-                                filter_over: _,
-                                order_by: _,
-                            } => {
+                            ast::Expr::FunctionCall { name, args, .. } => {
                                 let args_count = if let Some(args) = &args {
                                     args.len()
                                 } else {
                                     0
                                 };
-                                match Func::resolve_function(
-                                    normalize_ident(name.0.as_str()).as_str(),
-                                    args_count,
-                                ) {
+
+                                match Func::resolve_function(normalize_ident(name.0.as_str()).as_str(), args_count) {
                                     Ok(Func::Agg(f)) => {
                                         let agg = Aggregate {
                                             func: f,
@@ -362,36 +353,26 @@ pub fn prepare_select_plan<'a>(schema: &Schema, select: ast::Select) -> Result<P
                                     _ => {}
                                 }
                             }
-                            ast::Expr::FunctionCallStar {
-                                name,
-                                filter_over: _,
-                            } => {
-                                if let Ok(Func::Agg(f)) = Func::resolve_function(
-                                    normalize_ident(name.0.as_str()).as_str(),
-                                    0,
-                                ) {
+                            ast::Expr::FunctionCallStar { name, .. } => {
+                                if let Ok(Func::Agg(f)) = Func::resolve_function(normalize_ident(name.0.as_str()).as_str(), 0) {
                                     let agg = Aggregate {
                                         func: f,
-                                        args: vec![ast::Expr::Literal(ast::Literal::Numeric(
-                                            "1".to_string(),
-                                        ))],
+                                        args: vec![ast::Expr::Literal(ast::Literal::Numeric("1".to_string(), ))],
                                         original_expr: expr.clone(),
                                     };
+
                                     aggregate_expressions.push(agg.clone());
                                     plan.result_columns.push(ResultSetColumn {
                                         expr: expr.clone(),
                                         contains_aggregates: true,
                                     });
                                 } else {
-                                    crate::bail_parse_error!(
-                                        "Invalid aggregate function: {}",
-                                        name.0
-                                    );
+                                    crate::bail_parse_error!("Invalid aggregate function: {}",name.0);
                                 }
                             }
                             expr => {
-                                let contains_aggregates =
-                                    resolve_aggregates(expr, &mut aggregate_expressions);
+                                let contains_aggregates = resolve_aggregates(expr, &mut aggregate_expressions);
+
                                 plan.result_columns.push(ResultSetColumn {
                                     expr: expr.clone(),
                                     contains_aggregates,
@@ -401,9 +382,10 @@ pub fn prepare_select_plan<'a>(schema: &Schema, select: ast::Select) -> Result<P
                     }
                 }
             }
+
             if let Some(mut group_by) = group_by {
                 for expr in group_by.exprs.iter_mut() {
-                    bind_column_references(expr, &plan.referenced_tables)?;
+                    bindColRef(expr, &plan.refTbls)?;
                 }
 
                 plan.group_by = Some(GroupBy {
@@ -412,7 +394,7 @@ pub fn prepare_select_plan<'a>(schema: &Schema, select: ast::Select) -> Result<P
                         let mut predicates = vec![];
                         break_predicate_at_and_boundaries(having, &mut predicates);
                         for expr in predicates.iter_mut() {
-                            bind_column_references(expr, &plan.referenced_tables)?;
+                            bindColRef(expr, &plan.refTbls)?;
                             let contains_aggregates =
                                 resolve_aggregates(expr, &mut aggregate_expressions);
                             if !contains_aggregates {
@@ -441,24 +423,23 @@ pub fn prepare_select_plan<'a>(schema: &Schema, select: ast::Select) -> Result<P
                 for o in order_by {
                     // if the ORDER BY expression is a number, interpret it as an 1-indexed column number
                     // otherwise, interpret it normally as an expression
-                    let mut expr = if let ast::Expr::Literal(ast::Literal::Numeric(num)) = &o.expr {
-                        let column_number = num.parse::<usize>()?;
-                        if column_number == 0 {
-                            crate::bail_parse_error!("invalid column index: {}", column_number);
-                        }
-                        let maybe_result_column = columns.get(column_number - 1);
-                        match maybe_result_column {
-                            Some(ResultColumn::Expr(e, _)) => e.clone(),
-                            None => {
-                                crate::bail_parse_error!("invalid column index: {}", column_number)
+                    let mut expr =
+                        if let ast::Expr::Literal(ast::Literal::Numeric(num)) = &o.expr {
+                            let column_number = num.parse::<usize>()?;
+                            if column_number == 0 {
+                                crate::bail_parse_error!("invalid column index: {}", column_number);
                             }
-                            _ => todo!(),
-                        }
-                    } else {
-                        o.expr
-                    };
 
-                    bind_column_references(&mut expr, &plan.referenced_tables)?;
+                            match columns.get(column_number - 1) {
+                                Some(ResultColumn::Expr(e, _)) => e.clone(),
+                                None => crate::bail_parse_error!("invalid column index: {}", column_number),
+                                _ => todo!(),
+                            }
+                        } else {
+                            o.expr
+                        };
+
+                    bindColRef(&mut expr, &plan.refTbls)?;
                     resolve_aggregates(&expr, &mut plan.aggregates);
 
                     key.push((
@@ -469,7 +450,8 @@ pub fn prepare_select_plan<'a>(schema: &Schema, select: ast::Select) -> Result<P
                         }),
                     ));
                 }
-                plan.order_by = Some(key);
+
+                plan.orderByExprs = Some(key);
             }
 
             // Parse the LIMIT clause
@@ -491,13 +473,11 @@ pub fn prepare_select_plan<'a>(schema: &Schema, select: ast::Select) -> Result<P
 }
 
 #[allow(clippy::type_complexity)]
-fn parse_from(
-    schema: &Schema,
-    from: Option<FromClause>,
-    operator_id_counter: &mut OperatorIdCounter,
-) -> Result<(SourceOperator, Vec<BTreeTableReference>)> {
+fn parse_from(schema: &Schema,
+              from: Option<FromClause>,
+              operator_id_counter: &mut OperatorIdCounter) -> Result<(SrcOperator, Vec<BTreeTableRef>)> {
     if from.as_ref().and_then(|f| f.select.as_ref()).is_none() {
-        return Ok((SourceOperator::Nothing, vec![]));
+        return Ok((SrcOperator::Nothing, vec![]));
     }
 
     let from = from.unwrap();
@@ -514,7 +494,7 @@ fn parse_from(
                 })
                 .map(|a| a.0);
 
-            BTreeTableReference {
+            BTreeTableRef {
                 table: table.clone(),
                 table_identifier: alias.unwrap_or(qualified_name.name.0),
                 table_index: 0,
@@ -523,9 +503,9 @@ fn parse_from(
         _ => todo!(),
     };
 
-    let mut operator = SourceOperator::Scan {
-        table_reference: first_table.clone(),
-        predicates: None,
+    let mut operator = SrcOperator::Scan {
+        tblRef: first_table.clone(),
+        whereExprs: None,
         id: operator_id_counter.get_next_id(),
         iter_dir: None,
     };
@@ -534,9 +514,8 @@ fn parse_from(
 
     let mut table_index = 1;
     for join in from.joins.unwrap_or_default().into_iter() {
-        let (right, outer, using, predicates) =
-            parse_join(schema, join, operator_id_counter, &mut tables, table_index)?;
-        operator = SourceOperator::Join {
+        let (right, outer, using, predicates) = parse_join(schema, join, operator_id_counter, &mut tables, table_index)?;
+        operator = SrcOperator::Join {
             left: Box::new(operator),
             right: Box::new(right),
             predicates,
@@ -554,10 +533,10 @@ fn parse_join(
     schema: &Schema,
     join: ast::JoinedSelectTable,
     operator_id_counter: &mut OperatorIdCounter,
-    tables: &mut Vec<BTreeTableReference>,
+    tables: &mut Vec<BTreeTableRef>,
     table_index: usize,
 ) -> Result<(
-    SourceOperator,
+    SrcOperator,
     bool,
     Option<ast::DistinctNames>,
     Option<Vec<ast::Expr>>,
@@ -579,7 +558,7 @@ fn parse_join(
                     ast::As::Elided(id) => id,
                 })
                 .map(|a| a.0);
-            BTreeTableReference {
+            BTreeTableRef {
                 table: table.clone(),
                 table_identifier: alias.unwrap_or(qualified_name.name.0),
                 table_index,
@@ -652,7 +631,7 @@ fn parse_join(
                 let mut preds = vec![];
                 break_predicate_at_and_boundaries(expr, &mut preds);
                 for predicate in preds.iter_mut() {
-                    bind_column_references(predicate, tables)?;
+                    bindColRef(predicate, tables)?;
                 }
                 predicates = Some(preds);
             }
@@ -720,9 +699,9 @@ fn parse_join(
     }
 
     Ok((
-        SourceOperator::Scan {
-            table_reference: table.clone(),
-            predicates: None,
+        SrcOperator::Scan {
+            tblRef: table.clone(),
+            whereExprs: None,
             id: operator_id_counter.get_next_id(),
             iter_dir: None,
         },

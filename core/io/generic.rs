@@ -1,4 +1,4 @@
-use crate::{Completion, File, LimboError, OpenFlags, Result, IO};
+use crate::{CompletionEnum, File, LimboError, OpenFlags, Result, IO};
 use log::trace;
 use std::cell::RefCell;
 use std::io::{Read, Seek, Write};
@@ -13,7 +13,7 @@ impl GenericIO {
 }
 
 impl IO for GenericIO {
-    fn open_file(&self, path: &str, flags: OpenFlags, _direct: bool) -> Result<Rc<dyn File>> {
+    fn openFile(&self, path: &str, flags: OpenFlags, _direct: bool) -> Result<Rc<dyn File>> {
         trace!("open_file(path = {})", path);
         let file = std::fs::File::open(path)?;
         Ok(Rc::new(GenericFile {
@@ -21,7 +21,7 @@ impl IO for GenericIO {
         }))
     }
 
-    fn run_once(&self) -> Result<()> {
+    fn runOnce(&self) -> Result<()> {
         Ok(())
     }
 
@@ -51,12 +51,12 @@ impl File for GenericFile {
         Ok(())
     }
 
-    fn pread(&self, pos: usize, c: Rc<Completion>) -> Result<()> {
+    fn pread(&self, pos: usize, c: Rc<CompletionEnum>) -> Result<()> {
         let mut file = self.file.borrow_mut();
         file.seek(std::io::SeekFrom::Start(pos as u64))?;
         {
             let r = match &(*c) {
-                Completion::Read(r) => r,
+                CompletionEnum::Read(r) => r,
                 _ => unreachable!(),
             };
             let mut buf = r.buf_mut();
@@ -71,7 +71,7 @@ impl File for GenericFile {
         &self,
         pos: usize,
         buffer: Rc<RefCell<crate::Buffer>>,
-        c: Rc<Completion>,
+        c: Rc<CompletionEnum>,
     ) -> Result<()> {
         let mut file = self.file.borrow_mut();
         file.seek(std::io::SeekFrom::Start(pos as u64))?;
@@ -82,7 +82,7 @@ impl File for GenericFile {
         Ok(())
     }
 
-    fn sync(&self, c: Rc<Completion>) -> Result<()> {
+    fn sync(&self, c: Rc<CompletionEnum>) -> Result<()> {
         let mut file = self.file.borrow_mut();
         file.sync_all().map_err(|err| LimboError::IOError(err))?;
         c.complete(0);

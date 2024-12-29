@@ -8,7 +8,7 @@ use sqlite3_parser::ast::{
 use crate::error::SQLITE_CONSTRAINT_PRIMARYKEY;
 use crate::{
     schema::{Schema, Table},
-    storage::sqlite3_ondisk::DatabaseHeader,
+    storage::sqlite3_ondisk::DbHeader,
     translate::expr::translate_expr,
     vdbe::{builder::ProgramBuilder, Insn, Program},
 };
@@ -22,7 +22,7 @@ pub fn translate_insert(schema: &Schema,
                         _columns: &Option<DistinctNames>,
                         body: &InsertBody,
                         _returning: &Option<Vec<ResultColumn>>,
-                        database_header: Rc<RefCell<DatabaseHeader>>,
+                        database_header: Rc<RefCell<DbHeader>>,
                         connection: Weak<Conn>) -> Result<Program> {
     assert!(with.is_none());
     assert!(or_conflict.is_none());

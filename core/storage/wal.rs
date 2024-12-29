@@ -9,13 +9,13 @@ use crate::storage::sqlite3_ondisk::{
     begin_read_wal_frame, begin_write_wal_frame, WAL_FRAME_HEADER_SIZE, WAL_HEADER_SIZE,
 };
 use crate::{Buffer, Result};
-use crate::{Completion, Page};
+use crate::{CompletionEnum, Page};
 
 use self::sqlite3_ondisk::{checksum_wal, PageContent, WAL_MAGIC_BE, WAL_MAGIC_LE};
 
 use super::buffer_pool::BufferPool;
 use super::page_cache::PageCacheKey;
-use super::pager::{PageRef, Pager};
+use super::page::{PageArc, Pager};
 use super::sqlite3_ondisk::{self, begin_write_btree_page, WalHeader};
 
 /// Write-ahead log (WAL).
@@ -36,12 +36,12 @@ pub trait Wal {
     fn find_frame(&self, page_id: u64) -> Result<Option<u64>>;
 
     /// Read a frame from the WAL.
-    fn read_frame(&self, frame_id: u64, page: PageRef, buffer_pool: Rc<BufferPool>) -> Result<()>;
+    fn read_frame(&self, frame_id: u64, page: PageArc, buffer_pool: Rc<BufferPool>) -> Result<()>;
 
     /// Write a frame to the WAL.
     fn append_frame(
         &mut self,
-        page: PageRef,
+        page: PageArc,
         db_size: u32,
         write_counter: Rc<RefCell<usize>>,
     ) -> Result<()>;
@@ -89,7 +89,7 @@ pub enum CheckpointStatus {
 // current_page is a helper to iterate through all the pages that might have a frame in the safe
 // range. This is inneficient for now.
 struct OngoingCheckpoint {
-    page: PageRef,
+    page: PageArc,
     state: CheckpointState,
     min_frame: u64,
     max_frame: u64,
@@ -97,7 +97,7 @@ struct OngoingCheckpoint {
 }
 
 pub struct WalFile {
-    io: Arc<dyn crate::io::IO>,
+    io: Arc<dyn IO>,
     buffer_pool: Rc<BufferPool>,
 
     sync_state: RefCell<SyncState>,
@@ -115,7 +115,7 @@ pub struct WalFile {
 /// WalFileShared is the part of a WAL that will be shared between threads. A wal has information
 /// that needs to be communicated between threads so this struct does the job.
 pub struct WalFileShared {
-    wal_header: Arc<RwLock<sqlite3_ondisk::WalHeader>>,
+    wal_header: Arc<RwLock<WalHeader>>,
     min_frame: u64,
     max_frame: u64,
     nbackfills: u64,
@@ -173,7 +173,7 @@ impl Wal for WalFile {
     }
 
     /// Read a frame from the WAL.
-    fn read_frame(&self, frame_id: u64, page: PageRef, buffer_pool: Rc<BufferPool>) -> Result<()> {
+    fn read_frame(&self, frame_id: u64, page: PageArc, buffer_pool: Rc<BufferPool>) -> Result<()> {
         debug!("read_frame({})", frame_id);
         let offset = self.frame_offset(frame_id);
         let shared = self.shared.read().unwrap();
@@ -190,11 +190,11 @@ impl Wal for WalFile {
     /// Write a frame to the WAL.
     fn append_frame(
         &mut self,
-        page: PageRef,
+        page: PageArc,
         db_size: u32,
         write_counter: Rc<RefCell<usize>>,
     ) -> Result<()> {
-        let page_id = page.get().id;
+        let page_id = page.getMutInner().id;
         let mut shared = self.shared.write().unwrap();
         let frame_id = shared.max_frame;
         let offset = self.frame_offset(frame_id);
@@ -280,7 +280,7 @@ impl Wal for WalFile {
                                 page,
                                 *frame
                             );
-                            self.ongoing_checkpoint.page.get().id = page as usize;
+                            self.ongoing_checkpoint.page.getMutInner().id = page as usize;
 
                             self.read_frame(
                                 *frame,
@@ -348,7 +348,7 @@ impl Wal for WalFile {
                 {
                     let syncing = self.syncing.clone();
                     *syncing.borrow_mut() = true;
-                    let completion = Completion::Sync(SyncCompletion {
+                    let completion = CompletionEnum::Sync(SyncCompletion {
                         complete: Box::new(move |_| {
                             log::debug!("wal_sync finish");
                             *syncing.borrow_mut() = false;
@@ -393,10 +393,10 @@ impl WalFile {
             let drop_fn = Rc::new(move |buf| {
                 buffer_pool.put(buf);
             });
-            checkpoint_page.get().contents = Some(PageContent {
+            checkpoint_page.getMutInner().pageContent = Some(PageContent {
                 offset: 0,
                 buffer: Rc::new(RefCell::new(Buffer::new(buffer, drop_fn))),
-                overflow_cells: Vec::new(),
+                overflowCells: Vec::new(),
             });
         }
         Self {
@@ -433,7 +433,7 @@ impl WalFileShared {
         path: &str,
         page_size: u16,
     ) -> Result<Arc<RwLock<WalFileShared>>> {
-        let file = io.open_file(path, crate::io::OpenFlags::Create, false)?;
+        let file = io.openFile(path, crate::io::OpenFlags::Create, false)?;
         let header = if file.size()? > 0 {
             let wal_header = match sqlite3_ondisk::begin_read_wal_header(&file) {
                 Ok(header) => header,
@@ -441,7 +441,7 @@ impl WalFileShared {
             };
             log::info!("recover not implemented yet");
             // TODO: Return a completion instead.
-            io.run_once()?;
+            io.runOnce()?;
             wal_header
         } else {
             let magic = if cfg!(target_endian = "big") {

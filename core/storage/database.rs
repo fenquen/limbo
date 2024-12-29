@@ -1,4 +1,4 @@
-use crate::{error::LimboError, io::Completion, Buffer, Result};
+use crate::{error::LimboError, io::CompletionEnum, Buffer, Result};
 use std::{cell::RefCell, rc::Rc};
 
 /// DatabaseStorage is an interface a database file that consists of pages.
@@ -6,15 +6,13 @@ use std::{cell::RefCell, rc::Rc};
 /// The purpose of this trait is to abstract the upper layers of Limbo from
 /// the storage medium. A database can either be a file on disk, like in SQLite,
 /// or something like a remote page server service.
-pub trait DatabaseStorage {
-    fn read_page(&self, page_idx: usize, c: Rc<Completion>) -> Result<()>;
-    fn write_page(
-        &self,
-        page_idx: usize,
-        buffer: Rc<RefCell<Buffer>>,
-        c: Rc<Completion>,
-    ) -> Result<()>;
-    fn sync(&self, c: Rc<Completion>) -> Result<()>;
+pub trait Storage {
+    fn readPage(&self, pageIndex: usize, c: Rc<CompletionEnum>) -> Result<()>;
+    fn write_page(&self,
+                  page_idx: usize,
+                  buffer: Rc<RefCell<Buffer>>,
+                  c: Rc<CompletionEnum>) -> Result<()>;
+    fn sync(&self, c: Rc<CompletionEnum>) -> Result<()>;
 }
 
 #[cfg(feature = "fs")]
@@ -23,38 +21,41 @@ pub struct FileStorage {
 }
 
 #[cfg(feature = "fs")]
-impl DatabaseStorage for FileStorage {
-    fn read_page(&self, page_idx: usize, c: Rc<Completion>) -> Result<()> {
-        let r = match &(*c) {
-            Completion::Read(r) => r,
+impl Storage for FileStorage {
+    fn readPage(&self, pageIndex: usize, c: Rc<CompletionEnum>) -> Result<()> {
+        let readCompletion = match &(*c) {
+            CompletionEnum::Read(r) => r,
             _ => unreachable!(),
         };
-        let size = r.buf().len();
-        assert!(page_idx > 0);
+
+        let size = readCompletion.buf().len();
+
+        assert!(pageIndex > 0);
+
         if !(512..=65536).contains(&size) || size & (size - 1) != 0 {
-            return Err(LimboError::NotADB);
+            return Err(LimboError::NotDbFile);
         }
-        let pos = (page_idx - 1) * size;
+
+        let pos = (pageIndex - 1) * size;
         self.file.pread(pos, c)?;
+
         Ok(())
     }
 
-    fn write_page(
-        &self,
-        page_idx: usize,
-        buffer: Rc<RefCell<Buffer>>,
-        c: Rc<Completion>,
-    ) -> Result<()> {
+    fn write_page(&self,
+                  page_idx: usize,
+                  buffer: Rc<RefCell<Buffer>>,
+                  c: Rc<CompletionEnum>) -> Result<()> {
         let buffer_size = buffer.borrow().len();
         assert!(buffer_size >= 512);
         assert!(buffer_size <= 65536);
-        assert!((buffer_size & (buffer_size - 1)) == 0);
+        assert_eq!((buffer_size & (buffer_size - 1)), 0);
         let pos = (page_idx - 1) * buffer_size;
         self.file.pwrite(pos, buffer, c)?;
         Ok(())
     }
 
-    fn sync(&self, c: Rc<Completion>) -> Result<()> {
+    fn sync(&self, c: Rc<CompletionEnum>) -> Result<()> {
         self.file.sync(c)
     }
 }

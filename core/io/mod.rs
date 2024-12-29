@@ -10,8 +10,8 @@ use std::{
 };
 
 pub trait IO {
-    fn open_file(&self, path: &str, flags: OpenFlags, direct: bool) -> Result<Rc<dyn File>>;
-    fn run_once(&self) -> Result<()>;
+    fn openFile(&self, path: &str, flags: OpenFlags, direct: bool) -> Result<Rc<dyn File>>;
+    fn runOnce(&self) -> Result<()>;
     fn generate_random_number(&self) -> i64;
     fn get_current_time(&self) -> String;
 }
@@ -19,9 +19,9 @@ pub trait IO {
 pub trait File {
     fn lock_file(&self, exclusive: bool) -> Result<()>;
     fn unlock_file(&self) -> Result<()>;
-    fn pread(&self, pos: usize, c: Rc<Completion>) -> Result<()>;
-    fn pwrite(&self, pos: usize, buffer: Rc<RefCell<Buffer>>, c: Rc<Completion>) -> Result<()>;
-    fn sync(&self, c: Rc<Completion>) -> Result<()>;
+    fn pread(&self, pos: usize, c: Rc<CompletionEnum>) -> Result<()>;
+    fn pwrite(&self, pos: usize, buffer: Rc<RefCell<Buffer>>, c: Rc<CompletionEnum>) -> Result<()>;
+    fn sync(&self, c: Rc<CompletionEnum>) -> Result<()>;
     fn size(&self) -> Result<u64>;
 }
 
@@ -31,21 +31,20 @@ pub enum OpenFlags {
 }
 
 pub type Complete = dyn Fn(Rc<RefCell<Buffer>>);
-pub type WriteComplete = dyn Fn(i32);
-pub type SyncComplete = dyn Fn(i32);
 
-pub enum Completion {
+/// 含有对应各个action的当complete时候调用的fn
+pub enum CompletionEnum {
     Read(ReadCompletion),
     Write(WriteCompletion),
     Sync(SyncCompletion),
 }
 
-impl Completion {
+impl CompletionEnum {
     pub fn complete(&self, result: i32) {
         match self {
-            Completion::Read(r) => r.complete(),
-            Completion::Write(w) => w.complete(result),
-            Completion::Sync(s) => s.complete(result), // fix
+            CompletionEnum::Read(r) => r.complete(),
+            CompletionEnum::Write(w) => w.complete(result),
+            CompletionEnum::Sync(s) => s.complete(result), // fix
         }
     }
 }
@@ -73,26 +72,30 @@ impl ReadCompletion {
     }
 }
 
+pub type WriteCompleteFn = dyn Fn(i32);
+
 pub struct WriteCompletion {
-    pub complete: Box<WriteComplete>,
+    pub writeCompleteFn: Box<WriteCompleteFn>,
 }
 
 impl WriteCompletion {
-    pub fn new(complete: Box<WriteComplete>) -> Self {
-        Self { complete }
+    pub fn new(writeCompleteFn: Box<WriteCompleteFn>) -> Self {
+        Self { writeCompleteFn }
     }
 
     pub fn complete(&self, bytes_written: i32) {
-        (self.complete)(bytes_written);
+        (self.writeCompleteFn)(bytes_written);
     }
 }
 
+pub type SyncCompleteFn = dyn Fn(i32);
+
 pub struct SyncCompletion {
-    pub complete: Box<SyncComplete>,
+    pub complete: Box<SyncCompleteFn>,
 }
 
 impl SyncCompletion {
-    pub fn new(complete: Box<SyncComplete>) -> Self {
+    pub fn new(complete: Box<SyncCompleteFn>) -> Self {
         Self { complete }
     }
 
@@ -102,61 +105,60 @@ impl SyncCompletion {
 }
 
 pub type BufferData = Pin<Vec<u8>>;
-
-pub type BufferDropFn = Rc<dyn Fn(BufferData)>;
+pub type BufferDataDropFn = Rc<dyn Fn(BufferData)>;
 
 #[derive(Clone)]
 pub struct Buffer {
-    data: ManuallyDrop<BufferData>,
-    drop: BufferDropFn,
+    bufferData: ManuallyDrop<BufferData>,
+    bufferDataDropFn: BufferDataDropFn,
 }
 
 impl Debug for Buffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.data)
+        write!(f, "{:?}", self.bufferData)
     }
 }
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        let data = unsafe { ManuallyDrop::take(&mut self.data) };
-        (self.drop)(data);
+        let data = unsafe { ManuallyDrop::take(&mut self.bufferData) };
+        (self.bufferDataDropFn)(data);
     }
 }
 
 impl Buffer {
-    pub fn allocate(size: usize, drop: BufferDropFn) -> Self {
+    pub fn allocate(size: usize, drop: BufferDataDropFn) -> Self {
         let data = ManuallyDrop::new(Pin::new(vec![0; size]));
-        Self { data, drop }
+        Self { bufferData: data, bufferDataDropFn: drop }
     }
 
-    pub fn new(data: BufferData, drop: BufferDropFn) -> Self {
+    pub fn new(data: BufferData, drop: BufferDataDropFn) -> Self {
         let data = ManuallyDrop::new(data);
-        Self { data, drop }
+        Self { bufferData: data, bufferDataDropFn: drop }
     }
 
     pub fn len(&self) -> usize {
-        self.data.len()
+        self.bufferData.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.bufferData.is_empty()
     }
 
     pub fn as_slice(&self) -> &[u8] {
-        &self.data
+        &self.bufferData
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        &mut self.data
+        &mut self.bufferData
     }
 
     pub fn as_ptr(&self) -> *const u8 {
-        self.data.as_ptr()
+        self.bufferData.as_ptr()
     }
 
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.data.as_mut_ptr()
+        self.bufferData.as_mut_ptr()
     }
 }
 

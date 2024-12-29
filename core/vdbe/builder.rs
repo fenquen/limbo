@@ -4,7 +4,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use crate::{storage::sqlite3_ondisk::DatabaseHeader, Conn};
+use crate::{storage::sqlite3_ondisk::DbHeader, Conn};
 
 use super::{BranchOffset, CursorID, Insn, InsnReference, Program, Table};
 
@@ -364,7 +364,7 @@ impl ProgramBuilder {
 
     pub fn build(
         self,
-        database_header: Rc<RefCell<DatabaseHeader>>,
+        database_header: Rc<RefCell<DbHeader>>,
         connection: Weak<Conn>,
     ) -> Program {
         assert!(

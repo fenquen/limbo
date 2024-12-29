@@ -12,15 +12,16 @@ use std::rc::Rc;
 
 pub struct Schema {
     pub tables: HashMap<String, Rc<BTreeTable>>,
-    // table_name to list of indexes for the table
+
+    /// table_name to list of indexes for the table
     pub indexes: HashMap<String, Vec<Rc<Index>>>,
 }
 
 impl Schema {
     pub fn new() -> Self {
         let mut tables: HashMap<String, Rc<BTreeTable>> = HashMap::new();
+        tables.insert("sqlite_schema".to_string(), Rc::new(buildSqliteSchemaTable()));
         let indexes: HashMap<String, Vec<Rc<Index>>> = HashMap::new();
-        tables.insert("sqlite_schema".to_string(), Rc::new(sqlite_schema_table()));
         Self { tables, indexes }
     }
 
@@ -194,7 +195,7 @@ impl BTreeTable {
             sql.push_str("  ");
             sql.push_str(&column.name);
             sql.push(' ');
-            sql.push_str(&column.ty.to_string());
+            sql.push_str(&column.columnType.to_string());
         }
         sql.push_str(");\n");
         sql
@@ -211,10 +212,10 @@ impl PseudoTable {
         Self { columns: vec![] }
     }
 
-    pub fn add_column(&mut self, name: &str, ty: Type, primary_key: bool) {
+    pub fn add_column(&mut self, name: &str, ty: ColumnType, primary_key: bool) {
         self.columns.push(Column {
             name: normalize_ident(name),
-            ty,
+            columnType: ty,
             primary_key,
             is_rowid_alias: false,
         });
@@ -236,11 +237,9 @@ impl Default for PseudoTable {
     }
 }
 
-fn create_table(
-    tbl_name: QualifiedName,
-    body: CreateTableBody,
-    root_page: usize,
-) -> Result<BTreeTable> {
+fn create_table(tbl_name: QualifiedName,
+                body: CreateTableBody,
+                root_page: usize, ) -> Result<BTreeTable> {
     let table_name = normalize_ident(&tbl_name.name.0);
     trace!("Creating table {}", table_name);
     let mut has_rowid = true;
@@ -254,23 +253,18 @@ fn create_table(
         } => {
             if let Some(constraints) = constraints {
                 for c in constraints {
-                    if let sqlite3_parser::ast::TableConstraint::PrimaryKey { columns, .. } =
-                        c.constraint
-                    {
+                    if let sqlite3_parser::ast::TableConstraint::PrimaryKey { columns, .. } = c.constraint {
                         for column in columns {
                             primary_key_column_names.push(match column.expr {
                                 Expr::Id(id) => normalize_ident(&id.0),
-                                Expr::Literal(Literal::String(value)) => {
-                                    value.trim_matches('\'').to_owned()
-                                }
-                                _ => {
-                                    todo!("Unsupported primary key expression");
-                                }
+                                Expr::Literal(Literal::String(value)) => value.trim_matches('\'').to_owned(),
+                                _ => todo!("Unsupported primary key expression"),
                             });
                         }
                     }
                 }
             }
+
             for (col_name, col_def) in columns {
                 let name = col_name.0.to_string();
                 // Regular sqlite tables have an integer rowid that uniquely identifies a row.
@@ -288,24 +282,24 @@ fn create_table(
                         let type_name = data_type.name.as_str().to_uppercase();
                         if type_name.contains("INT") {
                             typename_exactly_integer = type_name == "INTEGER";
-                            Type::Integer
+                            ColumnType::Integer
                         } else if type_name.contains("CHAR")
                             || type_name.contains("CLOB")
                             || type_name.contains("TEXT")
                         {
-                            Type::Text
+                            ColumnType::Text
                         } else if type_name.contains("BLOB") || type_name.is_empty() {
-                            Type::Blob
+                            ColumnType::Blob
                         } else if type_name.contains("REAL")
                             || type_name.contains("FLOA")
                             || type_name.contains("DOUB")
                         {
-                            Type::Real
+                            ColumnType::Real
                         } else {
-                            Type::Numeric
+                            ColumnType::Numeric
                         }
                     }
-                    None => Type::Null,
+                    None => ColumnType::Null,
                 };
                 let mut primary_key = col_def.constraints.iter().any(|c| {
                     matches!(
@@ -320,7 +314,7 @@ fn create_table(
                 }
                 cols.push(Column {
                     name: normalize_ident(&name),
-                    ty,
+                    columnType: ty,
                     primary_key,
                     is_rowid_alias: typename_exactly_integer && primary_key,
                 });
@@ -368,13 +362,13 @@ pub fn _build_pseudo_table(columns: &[ResultColumn]) -> PseudoTable {
 #[derive(Debug, Clone)]
 pub struct Column {
     pub name: String,
-    pub ty: Type,
+    pub columnType: ColumnType,
     pub primary_key: bool,
     pub is_rowid_alias: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Type {
+pub enum ColumnType {
     Null,
     Text,
     Numeric,
@@ -383,54 +377,54 @@ pub enum Type {
     Blob,
 }
 
-impl fmt::Display for Type {
+impl fmt::Display for ColumnType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            Type::Null => "NULL",
-            Type::Text => "TEXT",
-            Type::Numeric => "NUMERIC",
-            Type::Integer => "INTEGER",
-            Type::Real => "REAL",
-            Type::Blob => "BLOB",
+            ColumnType::Null => "NULL",
+            ColumnType::Text => "TEXT",
+            ColumnType::Numeric => "NUMERIC",
+            ColumnType::Integer => "INTEGER",
+            ColumnType::Real => "REAL",
+            ColumnType::Blob => "BLOB",
         };
         write!(f, "{}", s)
     }
 }
 
-pub fn sqlite_schema_table() -> BTreeTable {
+pub fn buildSqliteSchemaTable() -> BTreeTable {
     BTreeTable {
         root_page: 1,
         name: "sqlite_schema".to_string(),
         has_rowid: true,
         primary_key_column_names: vec![],
         columns: vec![
-            Column {
+            Column { // index table
                 name: "type".to_string(),
-                ty: Type::Text,
+                columnType: ColumnType::Text,
                 primary_key: false,
                 is_rowid_alias: false,
             },
             Column {
                 name: "name".to_string(),
-                ty: Type::Text,
+                columnType: ColumnType::Text,
                 primary_key: false,
                 is_rowid_alias: false,
             },
             Column {
                 name: "tbl_name".to_string(),
-                ty: Type::Text,
+                columnType: ColumnType::Text,
                 primary_key: false,
                 is_rowid_alias: false,
             },
             Column {
                 name: "rootpage".to_string(),
-                ty: Type::Integer,
+                columnType: ColumnType::Integer,
                 primary_key: false,
                 is_rowid_alias: false,
             },
             Column {
                 name: "sql".to_string(),
-                ty: Type::Text,
+                columnType: ColumnType::Text,
                 primary_key: false,
                 is_rowid_alias: false,
             },
@@ -467,24 +461,22 @@ impl Index {
         let cmd = parser.next()?;
         match cmd {
             Some(Cmd::Stmt(Stmt::CreateIndex {
-                idx_name,
-                tbl_name,
-                columns,
-                unique,
-                ..
-            })) => {
+                               idx_name,
+                               tbl_name,
+                               columns,
+                               unique,
+                               ..
+                           })) => {
                 let index_name = normalize_ident(&idx_name.name.0);
-                let index_columns = columns
-                    .into_iter()
-                    .map(|col| IndexColumn {
+                let index_columns =
+                    columns.into_iter().map(|col| IndexColumn {
                         name: normalize_ident(&col.expr.to_string()),
                         order: match col.order {
                             Some(sqlite3_parser::ast::SortOrder::Asc) => Order::Ascending,
                             Some(sqlite3_parser::ast::SortOrder::Desc) => Order::Descending,
                             None => Order::Ascending,
                         },
-                    })
-                    .collect();
+                    }).collect();
                 Ok(Index {
                     name: index_name,
                     table_name: normalize_ident(&tbl_name.0),

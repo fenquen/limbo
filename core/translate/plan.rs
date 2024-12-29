@@ -22,6 +22,7 @@ pub struct ResultSetColumn {
 #[derive(Debug)]
 pub struct GroupBy {
     pub exprs: Vec<ast::Expr>,
+
     /// having clause split into a vec at 'AND' boundaries.
     pub having: Option<Vec<ast::Expr>>,
 }
@@ -29,23 +30,32 @@ pub struct GroupBy {
 #[derive(Debug)]
 pub struct Plan {
     /// A tree of sources (tables).
-    pub source: SourceOperator,
+    pub source: SrcOperator,
+
     /// the columns inside SELECT ... FROM
     pub result_columns: Vec<ResultSetColumn>,
+
     /// where clause split into a vec at 'AND' boundaries.
-    pub where_clause: Option<Vec<ast::Expr>>,
+    pub whereExprs: Option<Vec<ast::Expr>>,
+
     /// group by clause
     pub group_by: Option<GroupBy>,
+
     /// order by clause
-    pub order_by: Option<Vec<(ast::Expr, Direction)>>,
+    pub orderByExprs: Option<Vec<(ast::Expr, Direction)>>,
+
     /// all the aggregates collected from the result columns, order by, and (TODO) having clauses
     pub aggregates: Vec<Aggregate>,
+
     /// limit clause
     pub limit: Option<usize>,
+
     /// all the tables referenced in the query
-    pub referenced_tables: Vec<BTreeTableReference>,
-    /// all the indexes available
-    pub available_indexes: Vec<Rc<Index>>,
+    pub refTbls: Vec<BTreeTableRef>,
+
+    /// all the indexes available in schema
+    pub indexes: Vec<Rc<Index>>,
+
     /// query contains a constant condition that is always false
     pub contains_constant_false_condition: bool,
 }
@@ -62,13 +72,13 @@ pub enum IterationDirection {
     Backwards,
 }
 
-impl SourceOperator {
-    pub fn select_star(&self, out_columns: &mut Vec<ResultSetColumn>) {
-        for (table_ref, col, idx) in self.select_star_helper() {
-            out_columns.push(ResultSetColumn {
+impl SrcOperator {
+    pub fn select_star(&self, cols: &mut Vec<ResultSetColumn>) {
+        for (tblRef, col, idx) in self.select_star_helper() {
+            cols.push(ResultSetColumn {
                 expr: ast::Expr::Column {
                     database: None,
-                    table: table_ref.table_index,
+                    table: tblRef.table_index,
                     column: idx,
                     is_rowid_alias: col.is_rowid_alias,
                 },
@@ -78,9 +88,9 @@ impl SourceOperator {
     }
 
     /// All this ceremony is required to deduplicate columns when joining with USING
-    fn select_star_helper(&self) -> Vec<(&BTreeTableReference, &Column, usize)> {
+    fn select_star_helper(&self) -> Vec<(&BTreeTableRef, &Column, usize)> {
         match self {
-            SourceOperator::Join {
+            SrcOperator::Join {
                 left, right, using, ..
             } => {
                 let mut columns = left.select_star_helper();
@@ -91,10 +101,7 @@ impl SourceOperator {
                     let right_columns = right.select_star_helper();
 
                     for (table_ref, col, idx) in right_columns {
-                        if !using_cols
-                            .iter()
-                            .any(|using_col| col.name.eq_ignore_ascii_case(&using_col.0))
-                        {
+                        if !using_cols.iter().any(|using_col| col.name.eq_ignore_ascii_case(&using_col.0)) {
                             columns.push((table_ref, col, idx));
                         }
                     }
@@ -103,36 +110,24 @@ impl SourceOperator {
                 }
                 columns
             }
-            SourceOperator::Scan {
-                table_reference, ..
-            }
-            | SourceOperator::Search {
-                table_reference, ..
-            } => table_reference
-                .table
-                .columns
-                .iter()
-                .enumerate()
-                .map(|(i, col)| (table_reference, col, i))
-                .collect(),
-            SourceOperator::Nothing => Vec::new(),
+            SrcOperator::Scan { tblRef: table_reference, .. } | SrcOperator::Search { table_reference, .. } =>
+                table_reference.table.columns.iter().enumerate().map(|(i, col)| (table_reference, col, i)).collect(),
+            SrcOperator::Nothing => Vec::new(),
         }
     }
 }
 
-/**
-  A SourceOperator is a Node in the query plan that reads data from a table.
-*/
+/// sourceOperator is a Node in the query plan that reads data from a table.
 #[derive(Clone, Debug)]
-pub enum SourceOperator {
+pub enum SrcOperator {
     // Join operator
     // This operator is used to join two source operators.
     // It takes a left and right source operator, a list of predicates to evaluate,
     // and a boolean indicating whether it is an outer join.
     Join {
         id: usize,
-        left: Box<SourceOperator>,
-        right: Box<SourceOperator>,
+        left: Box<SrcOperator>,
+        right: Box<SrcOperator>,
         predicates: Option<Vec<ast::Expr>>,
         outer: bool,
         using: Option<ast::DistinctNames>,
@@ -148,8 +143,8 @@ pub enum SourceOperator {
     // assignments. for more detailed discussions, please refer to https://github.com/penberg/limbo/pull/376
     Scan {
         id: usize,
-        table_reference: BTreeTableReference,
-        predicates: Option<Vec<ast::Expr>>,
+        tblRef: BTreeTableRef,
+        whereExprs: Option<Vec<ast::Expr>>,
         iter_dir: Option<IterationDirection>,
     },
     // Search operator
@@ -157,34 +152,36 @@ pub enum SourceOperator {
     // (i.e. a primary key or a secondary index)
     Search {
         id: usize,
-        table_reference: BTreeTableReference,
-        search: Search,
+        table_reference: BTreeTableRef,
+        search: IndexSearch,
         predicates: Option<Vec<ast::Expr>>,
     },
     // Nothing operator
     // This operator is used to represent an empty query.
-    // e.g. SELECT * from foo WHERE 0 will eventually be optimized to Nothing.
+    // e.g. SELECT * from foo WHERE a!=a will eventually be optimized to Nothing.
     Nothing,
 }
 
 #[derive(Clone, Debug)]
-pub struct BTreeTableReference {
+pub struct BTreeTableRef {
     pub table: Rc<BTreeTable>,
     pub table_identifier: String,
     pub table_index: usize,
 }
 
-/// An enum that represents a search operation that can be used to search for a row in a table using an index
+/// An enum that represents a search operation that can use index
 /// (i.e. a primary key or a secondary index)
 #[derive(Clone, Debug)]
-pub enum Search {
+pub enum IndexSearch {
     /// A rowid equality point lookup. This is a special case that uses the SeekRowid bytecode instruction and does not loop.
     RowidEq { cmp_expr: ast::Expr },
+
     /// A rowid search. Uses bytecode instructions like SeekGT, SeekGE etc.
     RowidSearch {
         cmp_op: ast::Operator,
         cmp_expr: ast::Expr,
     },
+
     /// A secondary index search. Uses bytecode instructions like SeekGE, SeekGT etc.
     IndexSearch {
         index: Rc<Index>,
@@ -193,13 +190,13 @@ pub enum Search {
     },
 }
 
-impl SourceOperator {
+impl SrcOperator {
     pub fn id(&self) -> usize {
         match self {
-            SourceOperator::Join { id, .. } => *id,
-            SourceOperator::Scan { id, .. } => *id,
-            SourceOperator::Search { id, .. } => *id,
-            SourceOperator::Nothing => unreachable!(),
+            SrcOperator::Join { id, .. } => *id,
+            SrcOperator::Scan { id, .. } => *id,
+            SrcOperator::Search { id, .. } => *id,
+            SrcOperator::Nothing => unreachable!(),
         }
     }
 }
@@ -239,10 +236,10 @@ impl Display for Aggregate {
 }
 
 // For EXPLAIN QUERY PLAN
-impl Display for SourceOperator {
+impl Display for SrcOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         fn fmt_operator(
-            operator: &SourceOperator,
+            operator: &SrcOperator,
             f: &mut Formatter,
             level: usize,
             last: bool,
@@ -258,7 +255,7 @@ impl Display for SourceOperator {
             };
 
             match operator {
-                SourceOperator::Join {
+                SrcOperator::Join {
                     left,
                     right,
                     predicates,
@@ -283,9 +280,9 @@ impl Display for SourceOperator {
                     fmt_operator(left, f, level + 1, false)?;
                     fmt_operator(right, f, level + 1, true)
                 }
-                SourceOperator::Scan {
-                    table_reference,
-                    predicates: filter,
+                SrcOperator::Scan {
+                    tblRef: table_reference,
+                    whereExprs: filter,
                     ..
                 } => {
                     let table_name =
@@ -311,30 +308,18 @@ impl Display for SourceOperator {
                     }?;
                     Ok(())
                 }
-                SourceOperator::Search {
+                SrcOperator::Search {
                     table_reference,
                     search,
                     ..
                 } => {
                     match search {
-                        Search::RowidEq { .. } | Search::RowidSearch { .. } => {
-                            writeln!(
-                                f,
-                                "{}SEARCH {} USING INTEGER PRIMARY KEY (rowid=?)",
-                                indent, table_reference.table_identifier
-                            )?;
-                        }
-                        Search::IndexSearch { index, .. } => {
-                            writeln!(
-                                f,
-                                "{}SEARCH {} USING INDEX {}",
-                                indent, table_reference.table_identifier, index.name
-                            )?;
-                        }
+                        IndexSearch::RowidEq { .. } | IndexSearch::RowidSearch { .. } => writeln!(f, "{}SEARCH {} USING INTEGER PRIMARY KEY (rowid=?)", indent, table_reference.table_identifier)?,
+                        IndexSearch::IndexSearch { index, .. } => writeln!(f, "{}SEARCH {} USING INDEX {}", indent, table_reference.table_identifier, index.name)?,
                     }
                     Ok(())
                 }
-                SourceOperator::Nothing => Ok(()),
+                SrcOperator::Nothing => Ok(()),
             }
         }
         writeln!(f, "QUERY PLAN")?;
@@ -343,93 +328,81 @@ impl Display for SourceOperator {
 }
 
 /**
-  Returns a bitmask where each bit corresponds to a table in the `tables` vector.
-  If a table is referenced in the given Operator, the corresponding bit is set to 1.
-  Example:
-    if tables = [(table1, "t1"), (table2, "t2"), (table3, "t3")],
-    and the Operator is a join between table2 and table3,
-    then the return value will be (in bits): 110
+Returns a bitmask where each bit corresponds to a table in the `tables` vector.
+If a table is referenced in the given Operator, the corresponding bit is set to 1.
+Example:
+  if tables = [(table1, "t1"), (table2, "t2"), (table3, "t3")],
+  and the Operator is a join between table1 and table2,
+  then the return value will be (in bits): 011
 */
 pub fn get_table_ref_bitmask_for_operator<'a>(
-    tables: &'a Vec<BTreeTableReference>,
-    operator: &'a SourceOperator,
+    tables: &'a Vec<BTreeTableRef>,
+    operator: &'a SrcOperator,
 ) -> Result<usize> {
     let mut table_refs_mask = 0;
     match operator {
-        SourceOperator::Join { left, right, .. } => {
+        SrcOperator::Join { left, right, .. } => {
             table_refs_mask |= get_table_ref_bitmask_for_operator(tables, left)?;
             table_refs_mask |= get_table_ref_bitmask_for_operator(tables, right)?;
         }
-        SourceOperator::Scan {
-            table_reference, ..
+        SrcOperator::Scan {
+            tblRef: table_reference, ..
         } => {
             table_refs_mask |= 1
                 << tables
-                    .iter()
-                    .position(|t| &t.table_identifier == &table_reference.table_identifier)
-                    .unwrap();
+                .iter()
+                .position(|t| &t.table_identifier == &table_reference.table_identifier)
+                .unwrap();
         }
-        SourceOperator::Search {
+        SrcOperator::Search {
             table_reference, ..
         } => {
-            table_refs_mask |= 1
-                << tables
-                    .iter()
-                    .position(|t| &t.table_identifier == &table_reference.table_identifier)
-                    .unwrap();
+            table_refs_mask |= 1 << tables.iter().position(|t| &t.table_identifier == &table_reference.table_identifier).unwrap();
         }
-        SourceOperator::Nothing => {}
+        SrcOperator::Nothing => {}
     }
     Ok(table_refs_mask)
 }
 
 /**
-  Returns a bitmask where each bit corresponds to a table in the `tables` vector.
-  If a table is referenced in the given AST expression, the corresponding bit is set to 1.
-  Example:
-    if tables = [(table1, "t1"), (table2, "t2"), (table3, "t3")],
-    and predicate = "t1.a = t2.b"
-    then the return value will be (in bits): 011
+Returns a bitmask where each bit corresponds to a table in the `tables` vector.
+If a table is referenced in the given AST expression, the corresponding bit is set to 1.
+Example:
+  if tables = [(table1, "t1"), (table2, "t2"), (table3, "t3")],
+  and predicate = "t1.a = t2.b"
+  then the return value will be (in bits): 011
 */
-pub fn get_table_ref_bitmask_for_ast_expr<'a>(
-    tables: &'a Vec<BTreeTableReference>,
-    predicate: &'a ast::Expr,
-) -> Result<usize> {
-    let mut table_refs_mask = 0;
-    match predicate {
+pub fn getTblRefsMaskForWhereExpr<'a>(tblRefs: &'a Vec<BTreeTableRef>,
+                                      whereExpr: &'a ast::Expr) -> Result<usize> {
+    let mut tableRefsMask = 0;
+    match whereExpr {
         ast::Expr::Binary(e1, _, e2) => {
-            table_refs_mask |= get_table_ref_bitmask_for_ast_expr(tables, e1)?;
-            table_refs_mask |= get_table_ref_bitmask_for_ast_expr(tables, e2)?;
+            tableRefsMask |= getTblRefsMaskForWhereExpr(tblRefs, e1)?;
+            tableRefsMask |= getTblRefsMaskForWhereExpr(tblRefs, e2)?;
         }
-        ast::Expr::Column { table, .. } => {
-            table_refs_mask |= 1 << table;
-        }
+        ast::Expr::Column { table, .. } => tableRefsMask |= 1usize << table,
         ast::Expr::Id(_) => unreachable!("Id should be resolved to a Column before optimizer"),
-        ast::Expr::Qualified(_, _) => {
-            unreachable!("Qualified should be resolved to a Column before optimizer")
-        }
+        ast::Expr::Qualified(_, _) => unreachable!("Qualified should be resolved to a Column before optimizer"),
         ast::Expr::Literal(_) => {}
         ast::Expr::Like { lhs, rhs, .. } => {
-            table_refs_mask |= get_table_ref_bitmask_for_ast_expr(tables, lhs)?;
-            table_refs_mask |= get_table_ref_bitmask_for_ast_expr(tables, rhs)?;
+            tableRefsMask |= getTblRefsMaskForWhereExpr(tblRefs, lhs)?;
+            tableRefsMask |= getTblRefsMaskForWhereExpr(tblRefs, rhs)?;
         }
-        ast::Expr::FunctionCall {
-            args: Some(args), ..
-        } => {
+        ast::Expr::FunctionCall { args: Some(args), .. } => {
             for arg in args {
-                table_refs_mask |= get_table_ref_bitmask_for_ast_expr(tables, arg)?;
+                tableRefsMask |= getTblRefsMaskForWhereExpr(tblRefs, arg)?;
             }
         }
         ast::Expr::InList { lhs, rhs, .. } => {
-            table_refs_mask |= get_table_ref_bitmask_for_ast_expr(tables, lhs)?;
+            tableRefsMask |= getTblRefsMaskForWhereExpr(tblRefs, lhs)?;
             if let Some(rhs_list) = rhs {
                 for rhs_expr in rhs_list {
-                    table_refs_mask |= get_table_ref_bitmask_for_ast_expr(tables, rhs_expr)?;
+                    tableRefsMask |= getTblRefsMaskForWhereExpr(tblRefs, rhs_expr)?;
                 }
             }
         }
         _ => {}
     }
 
-    Ok(table_refs_mask)
+    Ok(tableRefsMask)
 }

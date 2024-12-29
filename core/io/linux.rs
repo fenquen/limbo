@@ -1,6 +1,6 @@
-use super::{Completion, File, OpenFlags, IO};
+use super::{CompletionEnum, File, OpenFlags, IO};
 use crate::{io, LimboError, Result};
-use libc::{c_short, fcntl, flock, iovec, F_SETLK};
+use libc::{c_short, flock, iovec, F_SETLK};
 use log::{debug, trace};
 use nix::fcntl::{FcntlArg, OFlag};
 use std::cell::RefCell;
@@ -30,141 +30,55 @@ pub struct LinuxIO {
     inner: Rc<RefCell<InnerLinuxIO>>,
 }
 
-impl LinuxIO {
-    pub fn new() -> Result<Self> {
-        let ring = io_uring::IoUring::new(MAX_IOVECS as u32)?;
-        let inner = InnerLinuxIO {
-            ring: WrappedIOUring {
-                ring,
-                pending_ops: 0,
-                pending: HashMap::new(),
-                key: 0,
-            },
-            iovecs: [iovec {
-                iov_base: std::ptr::null_mut(),
-                iov_len: 0,
-            }; MAX_IOVECS],
-            next_iovec: 0,
-        };
-        Ok(Self {
-            inner: Rc::new(RefCell::new(inner)),
-        })
-    }
-}
-
-struct InnerLinuxIO {
-    ring: WrappedIOUring,
-    iovecs: [iovec; MAX_IOVECS],
-    next_iovec: usize,
-}
-
-impl InnerLinuxIO {
-    pub fn get_iovec(&mut self, buf: *const u8, len: usize) -> &iovec {
-        let iovec = &mut self.iovecs[self.next_iovec];
-        iovec.iov_base = buf as *mut std::ffi::c_void;
-        iovec.iov_len = len;
-        self.next_iovec = (self.next_iovec + 1) % MAX_IOVECS;
-        iovec
-    }
-}
-
-/// iouring的 sqe submit queue entry
-// cqe completion queue entry
-struct WrappedIOUring {
-    ring: io_uring::IoUring,
-    pending_ops: usize,
-    pub pending: HashMap<u64, Rc<Completion>>,
-    key: u64,
-}
-
-impl WrappedIOUring {
-    fn submit_entry(&mut self, entry: &io_uring::squeue::Entry, c: Rc<Completion>) {
-        trace!("submit_entry({:?})", entry);
-        self.pending.insert(entry.get_user_data(), c);
-        unsafe {
-            self.ring.submission().push(entry).expect("submission queue is full");
-        }
-        self.pending_ops += 1;
-    }
-
-    fn wait_for_completion(&mut self) -> Result<()> {
-        self.ring.submit_and_wait(1)?;
-        Ok(())
-    }
-
-    fn get_completion(&mut self) -> Option<io_uring::cqueue::Entry> {
-        // NOTE: This works because CompletionQueue's next function pops the head of the queue. This is not normal behaviour of iterators
-        let entry = self.ring.completion().next();
-        if entry.is_some() {
-            trace!("get_completion({:?})", entry);
-            // consumed an entry from completion queue, update pending_ops
-            self.pending_ops -= 1;
-        }
-        entry
-    }
-
-    fn empty(&self) -> bool {
-        self.pending_ops == 0
-    }
-
-    fn get_key(&mut self) -> u64 {
-        self.key += 1;
-        self.key
-    }
-}
-
 impl IO for LinuxIO {
-    fn open_file(&self, path: &str, flags: OpenFlags, direct: bool) -> Result<Rc<dyn File>> {
-        trace!("open_file(path = {})", path);
-        let file = std::fs::File::options()
-            .read(true)
-            .write(true)
-            .create(matches!(flags, OpenFlags::Create))
-            .open(path)?;
-        // Let's attempt to enable direct I/O. Not all filesystems support it
-        // so ignore any errors.
-        let fd = file.as_raw_fd();
+    fn openFile(&self, path: &str, flags: OpenFlags, direct: bool) -> Result<Rc<dyn File>> {
+        let file = std::fs::File::options().read(true).write(true).create(matches!(flags, OpenFlags::Create)).open(path)?;
+
+        // direct io
         if direct {
-            match nix::fcntl::fcntl(fd, FcntlArg::F_SETFL(OFlag::O_DIRECT)) {
+            match nix::fcntl::fcntl(file.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_DIRECT)) {
                 Ok(_) => {}
                 Err(error) => debug!("Error {error:?} returned when setting O_DIRECT flag to read file. The performance of the system may be affected"),
             };
         }
+
         let linux_file = Rc::new(LinuxFile {
-            io: self.inner.clone(),
+            innerLinuxIo: self.inner.clone(),
             file,
         });
+
         if std::env::var(io::ENV_DISABLE_FILE_LOCK).is_err() {
             linux_file.lock_file(true)?;
         }
+
         Ok(linux_file)
     }
 
-    fn run_once(&self) -> Result<()> {
-        trace!("run_once()");
+    fn runOnce(&self) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let ring = &mut inner.ring;
+        let ioUringWrapper = &mut inner.ioUringWrapper;
 
-        if ring.empty() {
+        if ioUringWrapper.idle() {
             return Ok(());
         }
 
-        ring.wait_for_completion()?;
-        while let Some(cqe) = ring.get_completion() {
+        ioUringWrapper.wait_for_completion()?;
+
+        // cqe : completion queue entry
+        while let Some(cqe) = ioUringWrapper.get_completion() {
+            // 对read 和 sync 来说 它是 -1,0
+            // 对write来说它是written byte数量
             let result = cqe.result();
+
             if result < 0 {
-                return Err(LimboError::LinuxIOError(format!(
-                    "{} cqe: {:?}",
-                    LinuxIOError::IOUringCQError(result),
-                    cqe
-                )));
+                return Err(LimboError::LinuxIOError(format!("{} cqe: {:?}", LinuxIOError::IOUringCQError(result), cqe)));
             }
-            {
-                let c = ring.pending.get(&cqe.user_data()).unwrap().clone();
-                c.complete(cqe.result());
+
+            if let Some(c) = ioUringWrapper.pending.remove(&cqe.user_data()) {
+                c.complete(result);
             }
-            ring.pending.remove(&cqe.user_data());
         }
+
         Ok(())
     }
 
@@ -179,8 +93,93 @@ impl IO for LinuxIO {
     }
 }
 
+impl LinuxIO {
+    pub fn new() -> Result<Self> {
+        let ring = io_uring::IoUring::new(MAX_IOVECS as u32)?;
+        let inner = InnerLinuxIO {
+            ioUringWrapper: IoUringWrapper {
+                ioUring: ring,
+                pending_ops: 0,
+                pending: HashMap::new(),
+                key: 0,
+            },
+            iovecs: [iovec {
+                iov_base: std::ptr::null_mut(),
+                iov_len: 0,
+            }; MAX_IOVECS],
+            next_iovec: 0,
+        };
+
+        Ok(Self {
+            inner: Rc::new(RefCell::new(inner)),
+        })
+    }
+}
+
+struct InnerLinuxIO {
+    ioUringWrapper: IoUringWrapper,
+    iovecs: [iovec; MAX_IOVECS],
+    next_iovec: usize,
+}
+
+impl InnerLinuxIO {
+    pub fn get_iovec(&mut self, buf: *const u8, len: usize) -> &iovec {
+        let iovec = &mut self.iovecs[self.next_iovec];
+        iovec.iov_base = buf as *mut std::ffi::c_void;
+        iovec.iov_len = len;
+        self.next_iovec = (self.next_iovec + 1) % MAX_IOVECS;
+        iovec
+    }
+}
+
+///sqe: submit queue entry
+// cqe: completion queue entry
+struct IoUringWrapper {
+    ioUring: io_uring::IoUring,
+    pending_ops: usize,
+    pub pending: HashMap<u64, Rc<CompletionEnum>>,
+    key: u64,
+}
+
+impl IoUringWrapper {
+    fn pushToSubmitQueue(&mut self, entry: &io_uring::squeue::Entry, c: Rc<CompletionEnum>) {
+        trace!("submit_entry({:?})", entry);
+
+        // userData是1个标识是key用途
+        self.pending.insert(entry.get_user_data(), c);
+
+        // entry 提交到 submission queue
+        unsafe { self.ioUring.submission().push(entry).expect("submission queue is full"); }
+        self.pending_ops += 1;
+    }
+
+    fn wait_for_completion(&mut self) -> Result<()> {
+        // submission queue 的内容提交到内核 然后wait需要的数量
+        self.ioUring.submit_and_wait(1)?;
+
+        Ok(())
+    }
+
+    fn get_completion(&mut self) -> Option<io_uring::cqueue::Entry> {
+        // NOTE: This works because CompletionQueue's next function pops the head of the queue. This is not normal behaviour of iterators
+        self.ioUring.completion().next().map(|e| {
+            self.pending_ops -= 1;
+            e
+        })
+    }
+
+    fn idle(&self) -> bool {
+        self.pending_ops == 0
+    }
+
+    fn get_key(&mut self) -> u64 {
+        self.key += 1;
+        self.key
+    }
+}
+
 pub struct LinuxFile {
-    io: Rc<RefCell<InnerLinuxIO>>,
+    innerLinuxIo: Rc<RefCell<InnerLinuxIO>>,
     file: std::fs::File,
 }
 
@@ -201,16 +200,14 @@ impl File for LinuxFile {
 
         // F_SETLK is a non-blocking lock. The lock will be released when the file is closed
         // or the process exits or after an explicit unlock.
-        let lock_result = unsafe { fcntl(fd, F_SETLK, &flock) };
-        if lock_result == -1 {
+
+        if unsafe { libc::fcntl(fd, F_SETLK, &flock) } == -1 {
             let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::WouldBlock {
-                return Err(LimboError::LockingError(
-                    "File is locked by another process".into(),
-                ));
+            return if err.kind() == std::io::ErrorKind::WouldBlock {
+                Err(LimboError::LockingError("File is locked by another process".into()))
             } else {
-                return Err(LimboError::IOError(err));
-            }
+                Err(LimboError::IOError(err))
+            };
         }
         Ok(())
     }
@@ -225,7 +222,7 @@ impl File for LinuxFile {
             l_pid: 0,
         };
 
-        let unlock_result = unsafe { fcntl(fd, F_SETLK, &flock) };
+        let unlock_result = unsafe { libc::fcntl(fd, F_SETLK, &flock) };
         if unlock_result == -1 {
             return Err(LimboError::LockingError(format!(
                 "Failed to release file lock: {}",
@@ -235,57 +232,54 @@ impl File for LinuxFile {
         Ok(())
     }
 
-    fn pread(&self, pos: usize, c: Rc<Completion>) -> Result<()> {
-        let r = match &(*c) {
-            Completion::Read(r) => r,
+    fn pread(&self, pos: usize, c: Rc<CompletionEnum>) -> Result<()> {
+        let readCompletion = match &(*c) {
+            CompletionEnum::Read(r) => r,
             _ => unreachable!(),
         };
-        trace!("pread(pos = {}, length = {})", pos, r.buf().len());
+
         let fd = io_uring::types::Fd(self.file.as_raw_fd());
-        let mut io = self.io.borrow_mut();
+        let mut io = self.innerLinuxIo.borrow_mut();
+
         let read_e = {
-            let mut buf = r.buf_mut();
-            let len = buf.len();
-            let buf = buf.as_mut_ptr();
-            let iovec = io.get_iovec(buf, len);
-            io_uring::opcode::Readv::new(fd, iovec, 1)
-                .offset(pos as u64)
-                .build()
-                .user_data(io.ring.get_key())
+            let mut buf = readCompletion.buf_mut();
+            let iovec = io.get_iovec(buf.as_mut_ptr(), buf.len());
+            io_uring::opcode::Readv::new(fd, iovec, 1).offset(pos as u64).build().user_data(io.ioUringWrapper.get_key())
         };
-        io.ring.submit_entry(&read_e, c);
+
+        io.ioUringWrapper.pushToSubmitQueue(&read_e, c);
+
         Ok(())
     }
 
-    fn pwrite(
-        &self,
-        pos: usize,
-        buffer: Rc<RefCell<crate::Buffer>>,
-        c: Rc<Completion>,
-    ) -> Result<()> {
-        let mut io = self.io.borrow_mut();
+    fn pwrite(&self,
+              pos: usize,
+              buffer: Rc<RefCell<crate::Buffer>>,
+              c: Rc<CompletionEnum>) -> Result<()> {
+        let mut innerLinuxIo = self.innerLinuxIo.borrow_mut();
+
         let fd = io_uring::types::Fd(self.file.as_raw_fd());
-        let write = {
+
+        let writeEntry = {
             let buf = buffer.borrow();
-            trace!("pwrite(pos = {}, length = {})", pos, buf.len());
-            let iovec = io.get_iovec(buf.as_ptr(), buf.len());
-            io_uring::opcode::Writev::new(fd, iovec, 1)
-                .offset(pos as u64)
-                .build()
-                .user_data(io.ring.get_key())
+            let iovec = innerLinuxIo.get_iovec(buf.as_ptr(), buf.len());
+            // userData是1个标识
+            io_uring::opcode::Writev::new(fd, iovec, 1).offset(pos as u64).build().user_data(innerLinuxIo.ioUringWrapper.get_key())
         };
-        io.ring.submit_entry(&write, c);
+
+        innerLinuxIo.ioUringWrapper.pushToSubmitQueue(&writeEntry, c);
+
         Ok(())
     }
 
-    fn sync(&self, c: Rc<Completion>) -> Result<()> {
+    fn sync(&self, c: Rc<CompletionEnum>) -> Result<()> {
         let fd = io_uring::types::Fd(self.file.as_raw_fd());
-        let mut io = self.io.borrow_mut();
+        let mut io = self.innerLinuxIo.borrow_mut();
         trace!("sync()");
         let sync = io_uring::opcode::Fsync::new(fd)
             .build()
-            .user_data(io.ring.get_key());
-        io.ring.submit_entry(&sync, c);
+            .user_data(io.ioUringWrapper.get_key());
+        io.ioUringWrapper.pushToSubmitQueue(&sync, c);
         Ok(())
     }
 

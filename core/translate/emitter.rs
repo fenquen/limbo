@@ -8,8 +8,8 @@ use std::rc::{Rc, Weak};
 use sqlite3_parser::ast::{self};
 
 use crate::schema::{Column, PseudoTable, Table};
-use crate::storage::sqlite3_ondisk::DatabaseHeader;
-use crate::translate::plan::{IterationDirection, Search};
+use crate::storage::sqlite3_ondisk::DbHeader;
+use crate::translate::plan::{IterationDirection, IndexSearch};
 use crate::types::{OwnedRecord, OwnedValue};
 use crate::util::exprs_are_equivalent;
 use crate::vdbe::builder::ProgramBuilder;
@@ -20,8 +20,8 @@ use super::expr::{
     translate_aggregation, translate_aggregation_groupby, translate_condition_expr, translate_expr,
     ConditionMetadata,
 };
-use super::plan::{Aggregate, BTreeTableReference, Direction, GroupBy, Plan};
-use super::plan::{ResultSetColumn, SourceOperator};
+use super::plan::{Aggregate, BTreeTableRef, Direction, GroupBy, Plan};
+use super::plan::{ResultSetColumn, SrcOperator};
 
 // Metadata for handling LEFT JOIN operations
 #[derive(Debug)]
@@ -162,11 +162,9 @@ fn epilogue(
 
 /// Main entry point for emitting bytecode for a SQL query
 /// Takes a query plan and generates the corresponding bytecode program
-pub fn emit_program(
-    database_header: Rc<RefCell<DatabaseHeader>>,
-    mut plan: Plan,
-    connection: Weak<Conn>,
-) -> Result<Program> {
+pub fn emit_program(database_header: Rc<RefCell<DbHeader>>,
+                    mut plan: Plan,
+                    connection: Weak<Conn>) -> Result<Program> {
     let (mut program, mut metadata, init_label, start_offset) = prologue()?;
 
     // Trivial exit on LIMIT 0
@@ -194,7 +192,7 @@ pub fn emit_program(
     };
 
     // Initialize cursors and other resources needed for query execution
-    if let Some(ref mut order_by) = plan.order_by {
+    if let Some(ref mut order_by) = plan.orderByExprs {
         init_order_by(&mut program, order_by, &mut metadata)?;
     }
 
@@ -207,7 +205,7 @@ pub fn emit_program(
     open_loop(
         &mut program,
         &mut plan.source,
-        &plan.referenced_tables,
+        &plan.refTbls,
         &mut metadata,
     )?;
 
@@ -219,14 +217,14 @@ pub fn emit_program(
         &mut program,
         &plan.source,
         &mut metadata,
-        &plan.referenced_tables,
+        &plan.refTbls,
     )?;
 
     if let Some(skip_loops_label) = skip_loops_label {
         program.resolve_label(skip_loops_label, program.offset());
     }
 
-    let mut order_by_necessary = plan.order_by.is_some() && !plan.contains_constant_false_condition;
+    let mut order_by_necessary = plan.orderByExprs.is_some() && !plan.contains_constant_false_condition;
 
     // Handle GROUP BY and aggregation processing
     if let Some(ref mut group_by) = plan.group_by {
@@ -234,17 +232,17 @@ pub fn emit_program(
             &mut program,
             &plan.result_columns,
             group_by,
-            plan.order_by.as_ref(),
+            plan.orderByExprs.as_ref(),
             &plan.aggregates,
             plan.limit,
-            &plan.referenced_tables,
+            &plan.refTbls,
             &mut metadata,
         )?;
     } else if !plan.aggregates.is_empty() {
         // Handle aggregation without GROUP BY
         agg_without_group_by_emit(
             &mut program,
-            &plan.referenced_tables,
+            &plan.refTbls,
             &plan.result_columns,
             &plan.aggregates,
             &mut metadata,
@@ -254,7 +252,7 @@ pub fn emit_program(
     }
 
     // Process ORDER BY results if needed
-    if let Some(ref mut order_by) = plan.order_by {
+    if let Some(ref mut order_by) = plan.orderByExprs {
         if order_by_necessary {
             order_by_emit(
                 &mut program,
@@ -383,11 +381,11 @@ fn init_group_by(
 /// Initialize resources needed for the source operators (tables, joins, etc)
 fn init_source(
     program: &mut ProgramBuilder,
-    source: &SourceOperator,
+    source: &SrcOperator,
     metadata: &mut Metadata,
 ) -> Result<()> {
     match source {
-        SourceOperator::Join {
+        SrcOperator::Join {
             id,
             left,
             right,
@@ -407,9 +405,9 @@ fn init_source(
 
             return Ok(());
         }
-        SourceOperator::Scan {
+        SrcOperator::Scan {
             id,
-            table_reference,
+            tblRef: table_reference,
             ..
         } => {
             let cursor_id = program.alloc_cursor_id(
@@ -427,7 +425,7 @@ fn init_source(
 
             return Ok(());
         }
-        SourceOperator::Search {
+        SrcOperator::Search {
             id,
             table_reference,
             search,
@@ -448,7 +446,7 @@ fn init_source(
             });
             program.emit_insn(Insn::OpenReadAwait);
 
-            if let Search::IndexSearch { index, .. } = search {
+            if let IndexSearch::IndexSearch { index, .. } = search {
                 let index_cursor_id = program
                     .alloc_cursor_id(Some(index.name.clone()), Some(Table::Index(index.clone())));
                 program.emit_insn(Insn::OpenReadAsync {
@@ -460,7 +458,7 @@ fn init_source(
 
             return Ok(());
         }
-        SourceOperator::Nothing => {
+        SrcOperator::Nothing => {
             return Ok(());
         }
     }
@@ -471,12 +469,12 @@ fn init_source(
 /// for all tables involved, outermost first.
 fn open_loop(
     program: &mut ProgramBuilder,
-    source: &mut SourceOperator,
-    referenced_tables: &[BTreeTableReference],
+    source: &mut SrcOperator,
+    referenced_tables: &[BTreeTableRef],
     metadata: &mut Metadata,
 ) -> Result<()> {
     match source {
-        SourceOperator::Join {
+        SrcOperator::Join {
             id,
             left,
             right,
@@ -539,10 +537,10 @@ fn open_loop(
 
             return Ok(());
         }
-        SourceOperator::Scan {
+        SrcOperator::Scan {
             id,
-            table_reference,
-            predicates,
+            tblRef: table_reference,
+            whereExprs: predicates,
             iter_dir,
         } => {
             let cursor_id = program.resolve_cursor_id(&table_reference.table_identifier);
@@ -598,7 +596,7 @@ fn open_loop(
 
             return Ok(());
         }
-        SourceOperator::Search {
+        SrcOperator::Search {
             id,
             table_reference,
             search,
@@ -608,8 +606,8 @@ fn open_loop(
             let table_cursor_id = program.resolve_cursor_id(&table_reference.table_identifier);
             // Open the loop for the index search.
             // Rowid equality point lookups are handled with a SeekRowid instruction which does not loop, since it is a single row lookup.
-            if !matches!(search, Search::RowidEq { .. }) {
-                let index_cursor_id = if let Search::IndexSearch { index, .. } = search {
+            if !matches!(search, IndexSearch::RowidEq { .. }) {
+                let index_cursor_id = if let IndexSearch::IndexSearch { index, .. } = search {
                     Some(program.resolve_cursor_id(&index.name))
                 } else {
                     None
@@ -618,11 +616,11 @@ fn open_loop(
                 metadata.scan_loop_body_labels.push(scan_loop_body_label);
                 let cmp_reg = program.alloc_register();
                 let (cmp_expr, cmp_op) = match search {
-                    Search::IndexSearch {
+                    IndexSearch::IndexSearch {
                         cmp_expr, cmp_op, ..
                     } => (cmp_expr, cmp_op),
-                    Search::RowidSearch { cmp_expr, cmp_op } => (cmp_expr, cmp_op),
-                    Search::RowidEq { .. } => unreachable!(),
+                    IndexSearch::RowidSearch { cmp_expr, cmp_op } => (cmp_expr, cmp_op),
+                    IndexSearch::RowidEq { .. } => unreachable!(),
                 };
                 // TODO this only handles ascending indexes
                 match cmp_op {
@@ -748,7 +746,7 @@ fn open_loop(
 
             let jump_label = metadata.next_row_labels.get(id).unwrap();
 
-            if let Search::RowidEq { cmp_expr } = search {
+            if let IndexSearch::RowidEq { cmp_expr } = search {
                 let src_reg = program.alloc_register();
                 translate_expr(program, Some(referenced_tables), cmp_expr, src_reg, None)?;
                 program.emit_insn_with_label_dependency(
@@ -781,7 +779,7 @@ fn open_loop(
 
             return Ok(());
         }
-        SourceOperator::Nothing => {
+        SrcOperator::Nothing => {
             return Ok(());
         }
     }
@@ -825,7 +823,7 @@ fn inner_loop_emit(
                 group_by,
                 aggregates: &plan.aggregates,
             },
-            &plan.referenced_tables,
+            &plan.refTbls,
         );
     }
     // if we DONT have a group by, but we have aggregates, we emit without ResultRow.
@@ -837,18 +835,18 @@ fn inner_loop_emit(
             &plan.aggregates,
             metadata,
             InnerLoopEmitTarget::AggStep,
-            &plan.referenced_tables,
+            &plan.refTbls,
         );
     }
     // if we DONT have a group by, but we have an order by, we emit a record into the order by sorter.
-    if let Some(order_by) = &plan.order_by {
+    if let Some(order_by) = &plan.orderByExprs {
         return inner_loop_source_emit(
             program,
             &plan.result_columns,
             &plan.aggregates,
             metadata,
             InnerLoopEmitTarget::OrderBySorter { order_by },
-            &plan.referenced_tables,
+            &plan.refTbls,
         );
     }
     // if we have neither, we emit a ResultRow. In that case, if we have a Limit, we handle that with DecrJumpZero.
@@ -858,7 +856,7 @@ fn inner_loop_emit(
         &plan.aggregates,
         metadata,
         InnerLoopEmitTarget::ResultRow { limit: plan.limit },
-        &plan.referenced_tables,
+        &plan.refTbls,
     );
 }
 
@@ -871,7 +869,7 @@ fn inner_loop_source_emit(
     aggregates: &[Aggregate],
     metadata: &mut Metadata,
     emit_target: InnerLoopEmitTarget,
-    referenced_tables: &[BTreeTableReference],
+    referenced_tables: &[BTreeTableRef],
 ) -> Result<()> {
     match emit_target {
         InnerLoopEmitTarget::GroupBySorter {
@@ -981,14 +979,12 @@ fn inner_loop_source_emit(
 /// Closes the loop for a given source operator.
 /// For example in the case of a nested table scan, this means emitting the NextAsync instruction
 /// for all tables involved, innermost first.
-fn close_loop(
-    program: &mut ProgramBuilder,
-    source: &SourceOperator,
-    metadata: &mut Metadata,
-    referenced_tables: &[BTreeTableReference],
-) -> Result<()> {
+fn close_loop(program: &mut ProgramBuilder,
+              source: &SrcOperator,
+              metadata: &mut Metadata,
+              referenced_tables: &[BTreeTableRef]) -> Result<()> {
     match source {
-        SourceOperator::Join {
+        SrcOperator::Join {
             id,
             left,
             right,
@@ -1015,10 +1011,10 @@ fn close_loop(
                 // In that case, we now enter the routine that does exactly that.
                 // First we set the right table cursor's "pseudo null bit" on, which means any Insn::Column will return NULL
                 let right_cursor_id = match right.as_ref() {
-                    SourceOperator::Scan {
-                        table_reference, ..
+                    SrcOperator::Scan {
+                        tblRef: table_reference, ..
                     } => program.resolve_cursor_id(&table_reference.table_identifier),
-                    SourceOperator::Search {
+                    SrcOperator::Search {
                         table_reference, ..
                     } => program.resolve_cursor_id(&table_reference.table_identifier),
                     _ => unreachable!(),
@@ -1046,28 +1042,23 @@ fn close_loop(
 
             Ok(())
         }
-        SourceOperator::Scan {
+        SrcOperator::Scan {
             id,
-            table_reference,
+            tblRef: table_reference,
             iter_dir,
             ..
         } => {
             let cursor_id = program.resolve_cursor_id(&table_reference.table_identifier);
             program.resolve_label(*metadata.next_row_labels.get(id).unwrap(), program.offset());
-            if iter_dir
-                .as_ref()
-                .is_some_and(|dir| *dir == IterationDirection::Backwards)
-            {
+            if iter_dir.as_ref().is_some_and(|dir| *dir == IterationDirection::Backwards) {
                 program.emit_insn(Insn::PrevAsync { cursor_id });
             } else {
                 program.emit_insn(Insn::NextAsync { cursor_id });
             }
+
             let jump_label = metadata.scan_loop_body_labels.pop().unwrap();
 
-            if iter_dir
-                .as_ref()
-                .is_some_and(|dir| *dir == IterationDirection::Backwards)
-            {
+            if iter_dir.as_ref().is_some_and(|dir| *dir == IterationDirection::Backwards) {
                 program.emit_insn_with_label_dependency(
                     Insn::PrevAwait {
                         cursor_id,
@@ -1084,25 +1075,26 @@ fn close_loop(
                     jump_label,
                 );
             }
+
             Ok(())
         }
-        SourceOperator::Search {
+        SrcOperator::Search {
             id,
             table_reference,
             search,
             ..
         } => {
             program.resolve_label(*metadata.next_row_labels.get(id).unwrap(), program.offset());
-            if matches!(search, Search::RowidEq { .. }) {
+            if matches!(search, IndexSearch::RowidEq { .. }) {
                 // Rowid equality point lookups are handled with a SeekRowid instruction which does not loop, so there is no need to emit a NextAsync instruction.
                 return Ok(());
             }
             let cursor_id = match search {
-                Search::IndexSearch { index, .. } => program.resolve_cursor_id(&index.name),
-                Search::RowidSearch { .. } => {
+                IndexSearch::IndexSearch { index, .. } => program.resolve_cursor_id(&index.name),
+                IndexSearch::RowidSearch { .. } => {
                     program.resolve_cursor_id(&table_reference.table_identifier)
                 }
-                Search::RowidEq { .. } => unreachable!(),
+                IndexSearch::RowidEq { .. } => unreachable!(),
             };
 
             program.emit_insn(Insn::NextAsync { cursor_id });
@@ -1117,7 +1109,7 @@ fn close_loop(
 
             Ok(())
         }
-        SourceOperator::Nothing => Ok(()),
+        SrcOperator::Nothing => Ok(()),
     }
 }
 
@@ -1132,7 +1124,7 @@ fn group_by_emit(
     order_by: Option<&Vec<(ast::Expr, Direction)>>,
     aggregates: &[Aggregate],
     limit: Option<usize>,
-    referenced_tables: &[BTreeTableReference],
+    referenced_tables: &[BTreeTableRef],
     metadata: &mut Metadata,
 ) -> Result<()> {
     let sort_loop_start_label = program.allocate_label();
@@ -1163,7 +1155,7 @@ fn group_by_emit(
         .map(|i| Column {
             name: i.to_string(),
             primary_key: false,
-            ty: crate::schema::Type::Null,
+            columnType: crate::schema::ColumnType::Null,
             is_rowid_alias: false,
         })
         .collect::<Vec<_>>();
@@ -1476,7 +1468,7 @@ fn group_by_emit(
 /// and we can now materialize the aggregate results.
 fn agg_without_group_by_emit(
     program: &mut ProgramBuilder,
-    referenced_tables: &[BTreeTableReference],
+    referenced_tables: &[BTreeTableRef],
     result_columns: &[ResultSetColumn],
     aggregates: &[Aggregate],
     metadata: &mut Metadata,
@@ -1532,7 +1524,7 @@ fn order_by_emit(
             // Names don't matter. We are tracking which result column is in which position in the ORDER BY clause in m.result_column_indexes_in_orderby_sorter.
             name: format!("sort_key_{}", i),
             primary_key: false,
-            ty: crate::schema::Type::Null,
+            columnType: crate::schema::ColumnType::Null,
             is_rowid_alias: false,
         });
     }
@@ -1546,17 +1538,17 @@ fn order_by_emit(
         pseudo_columns.push(Column {
             name: rc.expr.to_string(),
             primary_key: false,
-            ty: crate::schema::Type::Null,
+            columnType: crate::schema::ColumnType::Null,
             is_rowid_alias: false,
         });
     }
 
     let num_columns_in_sorter = order_by.len() + result_columns.len()
         - metadata
-            .result_columns_to_skip_in_orderby_sorter
-            .as_ref()
-            .map(|v| v.len())
-            .unwrap_or(0);
+        .result_columns_to_skip_in_orderby_sorter
+        .as_ref()
+        .map(|v| v.len())
+        .unwrap_or(0);
 
     let pseudo_cursor = program.alloc_cursor_id(
         None,
@@ -1651,7 +1643,7 @@ fn emit_result_row_and_limit(
 /// Emits the bytecode for: all result columns, result row, and limit.
 fn emit_select_result(
     program: &mut ProgramBuilder,
-    referenced_tables: &[BTreeTableReference],
+    referenced_tables: &[BTreeTableRef],
     result_columns: &[ResultSetColumn],
     precomputed_exprs_to_register: Option<&Vec<(&ast::Expr, usize)>>,
     limit: Option<(usize, BranchOffset)>,
@@ -1694,7 +1686,7 @@ fn sorter_insert(
 /// Emits the bytecode for inserting a row into an ORDER BY sorter.
 fn order_by_sorter_insert(
     program: &mut ProgramBuilder,
-    referenced_tables: &[BTreeTableReference],
+    referenced_tables: &[BTreeTableRef],
     order_by: &[(ast::Expr, Direction)],
     result_columns: &[ResultSetColumn],
     result_column_indexes_in_orderby_sorter: &mut HashMap<usize, usize>,

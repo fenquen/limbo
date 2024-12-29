@@ -373,6 +373,7 @@ impl OwnedRecord {
         }
 
         let mut header_size = buf.len() - initial_i;
+
         // write content
         for value in &self.values {
             // TODO: make integers and floats with smaller serial types

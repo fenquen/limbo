@@ -186,10 +186,10 @@ impl LimboCliApp {
         let dbFilePath = opts.database.as_ref().map_or(":memory:".to_string(), |p| p.to_string_lossy().to_string());
 
         let io = get_io(&dbFilePath)?;
-        let db = Database::open_file(io.clone(), &dbFilePath)?;
-        let conn = db.connect();
-        let interrupt_count = Arc::new(AtomicUsize::new(0));
+        let database = Database::openFile(io.clone(), &dbFilePath)?;
+        let conn = database.connect();
 
+        let interrupt_count = Arc::new(AtomicUsize::new(0));
         {
             let interrupt_count: Arc<AtomicUsize> = Arc::clone(&interrupt_count);
             // Increment the interrupt count on Ctrl-C
@@ -277,7 +277,7 @@ impl LimboCliApp {
             ":memory:" => {
                 let io: Arc<dyn limbo_core::IO> = Arc::new(limbo_core::MemoryIO::new()?);
                 self.io = Arc::clone(&io);
-                let db = Database::open_file(self.io.clone(), path)?;
+                let db = Database::openFile(self.io.clone(), path)?;
                 self.conn = db.connect();
                 self.opts.db_file = ":memory:".to_string();
                 Ok(())
@@ -285,7 +285,7 @@ impl LimboCliApp {
             path => {
                 let io: Arc<dyn limbo_core::IO> = Arc::new(limbo_core::PlatformIO::new()?);
                 self.io = Arc::clone(&io);
-                let db = Database::open_file(self.io.clone(), path)?;
+                let db = Database::openFile(self.io.clone(), path)?;
                 self.conn = db.connect();
                 self.opts.db_file = path.to_string();
                 Ok(())
@@ -506,7 +506,7 @@ impl LimboCliApp {
                             let _ = self.writeln("");
                         }
                         Ok(RowResult::IO) => {
-                            self.io.run_once()?;
+                            self.io.runOnce()?;
                         }
                         Ok(RowResult::Done) => {
                             break;
@@ -539,7 +539,7 @@ impl LimboCliApp {
                                 );
                             }
                             Ok(RowResult::IO) => {
-                                self.io.run_once()?;
+                                self.io.runOnce()?;
                             }
                             Ok(RowResult::Done) => break,
                             Err(err) => {
@@ -585,7 +585,7 @@ impl LimboCliApp {
                                 found = true;
                             }
                         }
-                        RowResult::IO => { self.io.run_once()?; }
+                        RowResult::IO => { self.io.runOnce()?; }
                         RowResult::Done => break,
                     }
                 }
@@ -635,7 +635,7 @@ impl LimboCliApp {
                             }
                         }
                         RowResult::IO => {
-                            self.io.run_once()?;
+                            self.io.runOnce()?;
                         }
                         RowResult::Done => break,
                     }

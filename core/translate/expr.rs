@@ -3,12 +3,12 @@ use sqlite3_parser::ast::{self, UnaryOperator};
 #[cfg(feature = "json")]
 use crate::function::JsonFunc;
 use crate::function::{AggFunc, Func, FuncCtx, MathFuncArity, ScalarFunc};
-use crate::schema::Type;
+use crate::schema::ColumnType;
 use crate::util::normalize_ident;
 use crate::vdbe::{builder::ProgramBuilder, BranchOffset, Insn};
 use crate::Result;
 
-use super::plan::{Aggregate, BTreeTableReference};
+use super::plan::{Aggregate, BTreeTableRef};
 
 #[derive(Default, Debug, Clone, Copy)]
 pub struct ConditionMetadata {
@@ -17,13 +17,11 @@ pub struct ConditionMetadata {
     pub jump_target_when_false: BranchOffset,
 }
 
-pub fn translate_condition_expr(
-    program: &mut ProgramBuilder,
-    referenced_tables: &[BTreeTableReference],
-    expr: &ast::Expr,
-    condition_metadata: ConditionMetadata,
-    precomputed_exprs_to_registers: Option<&Vec<(&ast::Expr, usize)>>,
-) -> Result<()> {
+pub fn translate_condition_expr(program: &mut ProgramBuilder,
+                                referenced_tables: &[BTreeTableRef],
+                                expr: &ast::Expr,
+                                condition_metadata: ConditionMetadata,
+                                precomputed_exprs_to_registers: Option<&Vec<(&ast::Expr, usize)>>) -> Result<()> {
     match expr {
         ast::Expr::Between { .. } => todo!(),
         ast::Expr::Binary(lhs, ast::Operator::And, rhs) => {
@@ -545,13 +543,11 @@ pub fn translate_condition_expr(
     Ok(())
 }
 
-pub fn translate_expr(
-    program: &mut ProgramBuilder,
-    referenced_tables: Option<&[BTreeTableReference]>,
-    expr: &ast::Expr,
-    target_register: usize,
-    precomputed_exprs_to_registers: Option<&Vec<(&ast::Expr, usize)>>,
-) -> Result<usize> {
+pub fn translate_expr(program: &mut ProgramBuilder,
+                      referenced_tables: Option<&[BTreeTableRef]>,
+                      expr: &ast::Expr,
+                      target_register: usize,
+                      precomputed_exprs_to_registers: Option<&Vec<(&ast::Expr, usize)>>) -> Result<usize> {
     if let Some(precomputed_exprs_to_registers) = precomputed_exprs_to_registers {
         for (precomputed_expr, reg) in precomputed_exprs_to_registers.iter() {
             // TODO: implement a custom equality check for expressions
@@ -1756,7 +1752,7 @@ pub fn translate_expr(
                 });
             }
             let column = &tbl_ref.table.columns[*column];
-            maybe_apply_affinity(column.ty, target_register, program);
+            maybe_apply_affinity(column.columnType, target_register, program);
             Ok(target_register)
         }
         ast::Expr::InList { .. } => todo!(),
@@ -1960,8 +1956,8 @@ fn wrap_eval_jump_expr(
     program.preassign_label_to_next_insn(if_true_label);
 }
 
-pub fn maybe_apply_affinity(col_type: Type, target_register: usize, program: &mut ProgramBuilder) {
-    if col_type == crate::schema::Type::Real {
+pub fn maybe_apply_affinity(col_type: ColumnType, target_register: usize, program: &mut ProgramBuilder) {
+    if col_type == crate::schema::ColumnType::Real {
         program.emit_insn(Insn::RealAffinity {
             register: target_register,
         })
@@ -1970,7 +1966,7 @@ pub fn maybe_apply_affinity(col_type: Type, target_register: usize, program: &mu
 
 pub fn translate_aggregation(
     program: &mut ProgramBuilder,
-    referenced_tables: &[BTreeTableReference],
+    referenced_tables: &[BTreeTableRef],
     agg: &Aggregate,
     target_register: usize,
 ) -> Result<usize> {
@@ -2155,7 +2151,7 @@ pub fn translate_aggregation(
 
 pub fn translate_aggregation_groupby(
     program: &mut ProgramBuilder,
-    referenced_tables: &[BTreeTableReference],
+    referenced_tables: &[BTreeTableRef],
     group_by_sorter_cursor_id: usize,
     cursor_index: usize,
     agg: &Aggregate,

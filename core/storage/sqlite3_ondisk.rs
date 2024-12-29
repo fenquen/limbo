@@ -42,10 +42,10 @@
 //! https://www.sqlite.org/fileformat.html
 
 use crate::error::LimboError;
-use crate::io::{Buffer, Completion, ReadCompletion, SyncCompletion, WriteCompletion};
+use crate::io::{Buffer, CompletionEnum, ReadCompletion, SyncCompletion, WriteCompletion};
 use crate::storage::buffer_pool::BufferPool;
-use crate::storage::database::DatabaseStorage;
-use crate::storage::pager::Pager;
+use crate::storage::database::Storage;
+use crate::storage::page::Pager;
 use crate::types::{OwnedRecord, OwnedValue};
 use crate::{File, Result};
 use log::trace;
@@ -54,22 +54,28 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
-use super::pager::PageRef;
+use super::page::PageArc;
 
 /// The size of the database header in bytes.
 pub const DATABASE_HEADER_SIZE: usize = 100;
+
 // DEFAULT_CACHE_SIZE negative values mean that we store the amount of pages a XKiB of memory can hold.
 // We can calculate "real" cache size by diving by page size.
 const DEFAULT_CACHE_SIZE: i32 = -2000;
+
 // Minimum number of pages that cache can hold.
 pub const MIN_PAGE_CACHE_SIZE: usize = 10;
 
+/// The first 100 bytes of the database file
+/// https://www.sqlite.org/fileformat.html
 #[derive(Debug, Clone)]
-pub struct DatabaseHeader {
+pub struct DbHeader {
     magic: [u8; 16],
-    pub page_size: u16,
+    /// sqlite在dbHeader中便明确了各个page大小
+    pub pageSize: u16,
     write_version: u8,
     read_version: u8,
+    /// unused "reserved" space at the end of each page usually 0
     pub unused_space: u8,
     max_embed_frac: u8,
     min_embed_frac: u8,
@@ -91,43 +97,11 @@ pub struct DatabaseHeader {
     pub version_number: u32,
 }
 
-pub const WAL_HEADER_SIZE: usize = 32;
-pub const WAL_FRAME_HEADER_SIZE: usize = 24;
-// magic is a single number represented as WAL_MAGIC_LE but the big endian
-// counterpart is just the same number with LSB set to 1.
-pub const WAL_MAGIC_LE: u32 = 0x377f0682;
-pub const WAL_MAGIC_BE: u32 = 0x377f0683;
-
-#[derive(Debug, Default, Clone)]
-#[repr(C)] // This helps with encoding because rust does not respect the order in structs, so in
-           // this case we want to keep the order
-pub struct WalHeader {
-    pub magic: u32,
-    pub file_format: u32,
-    pub page_size: u32,
-    pub checkpoint_seq: u32,
-    pub salt_1: u32,
-    pub salt_2: u32,
-    pub checksum_1: u32,
-    pub checksum_2: u32,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Default)]
-pub struct WalFrameHeader {
-    page_number: u32,
-    db_size: u32,
-    salt_1: u32,
-    salt_2: u32,
-    checksum_1: u32,
-    checksum_2: u32,
-}
-
-impl Default for DatabaseHeader {
+impl Default for DbHeader {
     fn default() -> Self {
         Self {
             magic: *b"SQLite format 3\0",
-            page_size: 4096,
+            pageSize: 4096,
             write_version: 2,
             read_version: 2,
             unused_space: 0,
@@ -153,61 +127,95 @@ impl Default for DatabaseHeader {
     }
 }
 
-pub fn begin_read_database_header(
-    page_io: Rc<dyn DatabaseStorage>,
-) -> Result<Rc<RefCell<DatabaseHeader>>> {
-    let drop_fn = Rc::new(|_buf| {});
-    let buf = Rc::new(RefCell::new(Buffer::allocate(512, drop_fn)));
-    let result = Rc::new(RefCell::new(DatabaseHeader::default()));
-    let header = result.clone();
+pub const WAL_HEADER_SIZE: usize = 32;
+pub const WAL_FRAME_HEADER_SIZE: usize = 24;
+// magic is a single number represented as WAL_MAGIC_LE but the big endian
+// counterpart is just the same number with LSB set to 1.
+pub const WAL_MAGIC_LE: u32 = 0x377f0682;
+pub const WAL_MAGIC_BE: u32 = 0x377f0683;
+
+#[derive(Debug, Default, Clone)]
+#[repr(C)] // This helps with encoding because rust does not respect the order in structs, so in
+// this case we want to keep the order
+pub struct WalHeader {
+    pub magic: u32,
+    pub file_format: u32,
+    pub page_size: u32,
+    pub checkpoint_seq: u32,
+    pub salt_1: u32,
+    pub salt_2: u32,
+    pub checksum_1: u32,
+    pub checksum_2: u32,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub struct WalFrameHeader {
+    page_number: u32,
+    db_size: u32,
+    salt_1: u32,
+    salt_2: u32,
+    checksum_1: u32,
+    checksum_2: u32,
+}
+
+pub fn begin_read_database_header(dbStorage: Rc<dyn Storage>) -> Result<Rc<RefCell<DbHeader>>> {
+    let dbHeader = Rc::new(RefCell::new(DbHeader::default()));
+
+    let header = dbHeader.clone();
+
     let complete = Box::new(move |buf: Rc<RefCell<Buffer>>| {
         let header = header.clone();
         finish_read_database_header(buf, header).unwrap();
     });
-    let c = Rc::new(Completion::Read(ReadCompletion::new(buf, complete)));
-    page_io.read_page(1, c.clone())?;
-    Ok(result)
+
+    let buffer = Rc::new(RefCell::new(Buffer::allocate(512, Rc::new(|_buf| {}))));
+    dbStorage.readPage(1, Rc::new(CompletionEnum::Read(ReadCompletion::new(buffer, complete))))?;
+
+    Ok(dbHeader)
 }
 
-fn finish_read_database_header(
-    buf: Rc<RefCell<Buffer>>,
-    header: Rc<RefCell<DatabaseHeader>>,
-) -> Result<()> {
+/// 读取到的文件中的dbHeader原始data还原到struct
+fn finish_read_database_header(buf: Rc<RefCell<Buffer>>, header: Rc<RefCell<DbHeader>>) -> Result<()> {
+    // 读到的文件的data落地到了data
     let buf = buf.borrow();
     let buf = buf.as_slice();
-    let mut header = std::cell::RefCell::borrow_mut(&header);
-    header.magic.copy_from_slice(&buf[0..16]);
-    header.page_size = u16::from_be_bytes([buf[16], buf[17]]);
-    header.write_version = buf[18];
-    header.read_version = buf[19];
-    header.unused_space = buf[20];
-    header.max_embed_frac = buf[21];
-    header.min_embed_frac = buf[22];
-    header.min_leaf_frac = buf[23];
-    header.change_counter = u32::from_be_bytes([buf[24], buf[25], buf[26], buf[27]]);
-    header.database_size = u32::from_be_bytes([buf[28], buf[29], buf[30], buf[31]]);
-    header.freelist_trunk_page = u32::from_be_bytes([buf[32], buf[33], buf[34], buf[35]]);
-    header.freelist_pages = u32::from_be_bytes([buf[36], buf[37], buf[38], buf[39]]);
-    header.schema_cookie = u32::from_be_bytes([buf[40], buf[41], buf[42], buf[43]]);
-    header.schema_format = u32::from_be_bytes([buf[44], buf[45], buf[46], buf[47]]);
-    header.default_cache_size = i32::from_be_bytes([buf[48], buf[49], buf[50], buf[51]]);
-    if header.default_cache_size == 0 {
-        header.default_cache_size = DEFAULT_CACHE_SIZE;
+
+    let mut dbHeader = RefCell::borrow_mut(&header);
+
+    dbHeader.magic.copy_from_slice(&buf[0..16]);
+    dbHeader.pageSize = u16::from_be_bytes([buf[16], buf[17]]);
+    dbHeader.write_version = buf[18];
+    dbHeader.read_version = buf[19];
+    dbHeader.unused_space = buf[20];
+    dbHeader.max_embed_frac = buf[21];
+    dbHeader.min_embed_frac = buf[22];
+    dbHeader.min_leaf_frac = buf[23];
+    dbHeader.change_counter = u32::from_be_bytes([buf[24], buf[25], buf[26], buf[27]]);
+    dbHeader.database_size = u32::from_be_bytes([buf[28], buf[29], buf[30], buf[31]]);
+    dbHeader.freelist_trunk_page = u32::from_be_bytes([buf[32], buf[33], buf[34], buf[35]]);
+    dbHeader.freelist_pages = u32::from_be_bytes([buf[36], buf[37], buf[38], buf[39]]);
+    dbHeader.schema_cookie = u32::from_be_bytes([buf[40], buf[41], buf[42], buf[43]]);
+    dbHeader.schema_format = u32::from_be_bytes([buf[44], buf[45], buf[46], buf[47]]);
+    dbHeader.default_cache_size = i32::from_be_bytes([buf[48], buf[49], buf[50], buf[51]]);
+    if dbHeader.default_cache_size == 0 {
+        dbHeader.default_cache_size = DEFAULT_CACHE_SIZE;
     }
-    header.vacuum = u32::from_be_bytes([buf[52], buf[53], buf[54], buf[55]]);
-    header.text_encoding = u32::from_be_bytes([buf[56], buf[57], buf[58], buf[59]]);
-    header.user_version = u32::from_be_bytes([buf[60], buf[61], buf[62], buf[63]]);
-    header.incremental_vacuum = u32::from_be_bytes([buf[64], buf[65], buf[66], buf[67]]);
-    header.application_id = u32::from_be_bytes([buf[68], buf[69], buf[70], buf[71]]);
-    header.reserved.copy_from_slice(&buf[72..92]);
-    header.version_valid_for = u32::from_be_bytes([buf[92], buf[93], buf[94], buf[95]]);
-    header.version_number = u32::from_be_bytes([buf[96], buf[97], buf[98], buf[99]]);
+    dbHeader.vacuum = u32::from_be_bytes([buf[52], buf[53], buf[54], buf[55]]);
+    dbHeader.text_encoding = u32::from_be_bytes([buf[56], buf[57], buf[58], buf[59]]);
+    dbHeader.user_version = u32::from_be_bytes([buf[60], buf[61], buf[62], buf[63]]);
+    dbHeader.incremental_vacuum = u32::from_be_bytes([buf[64], buf[65], buf[66], buf[67]]);
+    dbHeader.application_id = u32::from_be_bytes([buf[68], buf[69], buf[70], buf[71]]);
+    dbHeader.reserved.copy_from_slice(&buf[72..92]);
+    dbHeader.version_valid_for = u32::from_be_bytes([buf[92], buf[93], buf[94], buf[95]]);
+    dbHeader.version_number = u32::from_be_bytes([buf[96], buf[97], buf[98], buf[99]]);
+
     Ok(())
 }
 
-pub fn begin_write_database_header(header: &DatabaseHeader, pager: &Pager) -> Result<()> {
+pub fn begin_write_database_header(header: &DbHeader, pager: &Pager) -> Result<()> {
     let header = Rc::new(header.clone());
-    let page_source = pager.page_io.clone();
+    let page_source = pager.storage.clone();
 
     let drop_fn = Rc::new(|_buf| {});
     let buffer_to_copy = Rc::new(RefCell::new(Buffer::allocate(512, drop_fn)));
@@ -221,7 +229,7 @@ pub fn begin_write_database_header(header: &DatabaseHeader, pager: &Pager) -> Re
         {
             let mut buf_mut = std::cell::RefCell::borrow_mut(&buffer);
             let buf = buf_mut.as_mut_slice();
-            write_header_to_buf(buf, &header);
+            writeDbHeader2Buf(buf, &header);
             let mut buffer_to_copy = std::cell::RefCell::borrow_mut(&buffer_to_copy_in_cb);
             let buffer_to_copy_slice = buffer_to_copy.as_mut_slice();
 
@@ -231,10 +239,10 @@ pub fn begin_write_database_header(header: &DatabaseHeader, pager: &Pager) -> Re
 
     let drop_fn = Rc::new(|_buf| {});
     let buf = Rc::new(RefCell::new(Buffer::allocate(512, drop_fn)));
-    let c = Rc::new(Completion::Read(ReadCompletion::new(buf.clone(), complete)));
-    page_source.read_page(1, c.clone())?;
+    let c = Rc::new(CompletionEnum::Read(ReadCompletion::new(buf.clone(), complete)));
+    page_source.readPage(1, c.clone())?;
     // run get header block
-    pager.io.run_once()?;
+    pager.io.runOnce()?;
 
     let buffer_in_cb = buffer_to_copy.clone();
     let write_complete = Box::new(move |bytes_written: i32| {
@@ -245,7 +253,7 @@ pub fn begin_write_database_header(header: &DatabaseHeader, pager: &Pager) -> Re
         }
         // finish_read_database_header(buf, header).unwrap();
     });
-    let c = Rc::new(Completion::Write(WriteCompletion::new(write_complete)));
+    let c = Rc::new(CompletionEnum::Write(WriteCompletion::new(write_complete)));
     page_source
         .write_page(0, buffer_to_copy.clone(), c)
         .unwrap();
@@ -253,9 +261,9 @@ pub fn begin_write_database_header(header: &DatabaseHeader, pager: &Pager) -> Re
     Ok(())
 }
 
-fn write_header_to_buf(buf: &mut [u8], header: &DatabaseHeader) {
+fn writeDbHeader2Buf(buf: &mut [u8], header: &DbHeader) {
     buf[0..16].copy_from_slice(&header.magic);
-    buf[16..18].copy_from_slice(&header.page_size.to_be_bytes());
+    buf[16..18].copy_from_slice(&header.pageSize.to_be_bytes());
     buf[18] = header.write_version;
     buf[19] = header.read_version;
     buf[20] = header.unused_space;
@@ -313,18 +321,9 @@ pub struct OverflowCell {
 #[derive(Debug)]
 pub struct PageContent {
     pub offset: usize,
+    /// 大小和page相同,因为bufferPool生成的时候配置的参数是dbHeader的pageSize
     pub buffer: Rc<RefCell<Buffer>>,
-    pub overflow_cells: Vec<OverflowCell>,
-}
-
-impl Clone for PageContent {
-    fn clone(&self) -> Self {
-        Self {
-            offset: self.offset,
-            buffer: Rc::new(RefCell::new((*self.buffer.borrow()).clone())),
-            overflow_cells: self.overflow_cells.clone(),
-        }
-    }
+    pub overflowCells: Vec<OverflowCell>,
 }
 
 impl PageContent {
@@ -342,10 +341,8 @@ impl PageContent {
     #[allow(clippy::mut_from_ref)]
     pub fn as_ptr(&self) -> &mut [u8] {
         unsafe {
-            // unsafe trick to borrow twice
-            let buf_pointer = &self.buffer.as_ptr();
-            let buf = (*buf_pointer).as_mut().unwrap().as_mut_slice();
-            buf
+            let buffer = &self.buffer.as_ptr();
+            (*buffer).as_mut().unwrap().as_mut_slice()
         }
     }
 
@@ -369,8 +366,12 @@ impl PageContent {
         ])
     }
 
+    pub fn writeDyn<const N: usize>(&self, pos: usize, slice: &[u8; N]) {
+        let buf = self.as_ptr();
+        buf[self.offset + pos..self.offset + pos + N].copy_from_slice(slice);
+    }
+
     pub fn write_u8(&self, pos: usize, value: u8) {
-        log::debug!("write_u8(pos={}, value={})", pos, value);
         let buf = self.as_ptr();
         buf[self.offset + pos] = value;
     }
@@ -525,18 +526,25 @@ impl PageContent {
         }
     }
 
-    pub fn write_database_header(&self, header: &DatabaseHeader) {
-        let buf = self.as_ptr();
-        write_header_to_buf(buf, header);
+    pub fn writeDbHeader(&self, header: &DbHeader) {
+        writeDbHeader2Buf(self.as_ptr(), header);
     }
 }
 
-pub fn begin_read_page(
-    page_io: Rc<dyn DatabaseStorage>,
-    buffer_pool: Rc<BufferPool>,
-    page: PageRef,
-    page_idx: usize,
-) -> Result<()> {
+impl Clone for PageContent {
+    fn clone(&self) -> Self {
+        Self {
+            offset: self.offset,
+            buffer: Rc::new(RefCell::new((*self.buffer.borrow()).clone())),
+            overflowCells: self.overflowCells.clone(),
+        }
+    }
+}
+
+pub fn begin_read_page(page_io: Rc<dyn Storage>,
+                       buffer_pool: Rc<BufferPool>,
+                       page: PageArc,
+                       page_idx: usize) -> Result<()> {
     trace!("begin_read_btree_page(page_idx = {})", page_idx);
     let buf = buffer_pool.get();
     let drop_fn = Rc::new(move |buf| {
@@ -550,12 +558,12 @@ pub fn begin_read_page(
             page.set_error();
         }
     });
-    let c = Rc::new(Completion::Read(ReadCompletion::new(buf, complete)));
-    page_io.read_page(page_idx, c.clone())?;
+    let c = Rc::new(CompletionEnum::Read(ReadCompletion::new(buf, complete)));
+    page_io.readPage(page_idx, c.clone())?;
     Ok(())
 }
 
-fn finish_read_page(page_idx: usize, buffer_ref: Rc<RefCell<Buffer>>, page: PageRef) -> Result<()> {
+fn finish_read_page(page_idx: usize, buffer_ref: Rc<RefCell<Buffer>>, page: PageArc) -> Result<()> {
     trace!("finish_read_btree_page(page_idx = {})", page_idx);
     let pos = if page_idx == 1 {
         DATABASE_HEADER_SIZE
@@ -565,10 +573,10 @@ fn finish_read_page(page_idx: usize, buffer_ref: Rc<RefCell<Buffer>>, page: Page
     let inner = PageContent {
         offset: pos,
         buffer: buffer_ref.clone(),
-        overflow_cells: Vec::new(),
+        overflowCells: Vec::new(),
     };
     {
-        page.get().contents.replace(inner);
+        page.getMutInner().pageContent.replace(inner);
         page.set_uptodate();
         page.clear_locked();
         page.set_loaded();
@@ -578,18 +586,18 @@ fn finish_read_page(page_idx: usize, buffer_ref: Rc<RefCell<Buffer>>, page: Page
 
 pub fn begin_write_btree_page(
     pager: &Pager,
-    page: &PageRef,
+    page: &PageArc,
     write_counter: Rc<RefCell<usize>>,
 ) -> Result<()> {
-    log::trace!("begin_write_btree_page(page={})", page.get().id);
-    let page_source = &pager.page_io;
+    log::trace!("begin_write_btree_page(page={})", page.getMutInner().id);
+    let page_source = &pager.storage;
     let page_finish = page.clone();
 
-    let page_id = page.get().id;
+    let page_id = page.getMutInner().id;
     log::trace!("begin_write_btree_page(page_id={})", page_id);
     let buffer = {
-        let page = page.get();
-        let contents = page.contents.as_ref().unwrap();
+        let page = page.getMutInner();
+        let contents = page.pageContent.as_ref().unwrap();
         contents.buffer.clone()
     };
 
@@ -608,15 +616,15 @@ pub fn begin_write_btree_page(
             }
         })
     };
-    let c = Rc::new(Completion::Write(WriteCompletion::new(write_complete)));
+    let c = Rc::new(CompletionEnum::Write(WriteCompletion::new(write_complete)));
     page_source.write_page(page_id, buffer.clone(), c)?;
     Ok(())
 }
 
-pub fn begin_sync(page_io: Rc<dyn DatabaseStorage>, syncing: Rc<RefCell<bool>>) -> Result<()> {
+pub fn begin_sync(page_io: Rc<dyn Storage>, syncing: Rc<RefCell<bool>>) -> Result<()> {
     assert!(!*syncing.borrow());
     *syncing.borrow_mut() = true;
-    let completion = Completion::Sync(SyncCompletion {
+    let completion = CompletionEnum::Sync(SyncCompletion {
         complete: Box::new(move |_| {
             *syncing.borrow_mut() = false;
         }),
@@ -769,14 +777,14 @@ fn read_payload(unread: &[u8], payload_size: usize, pager: Rc<Pager>) -> (Vec<u8
                     break;
                 }
             }
-            let page = page.get();
-            let contents = page.contents.as_mut().unwrap();
+            let page = page.getMutInner();
+            let pageContent = page.pageContent.as_mut().unwrap();
 
             let to_read = left_to_read.min(usable_size - 4);
-            let buf = contents.as_ptr();
+            let buf = pageContent.as_ptr();
             payload.extend_from_slice(&buf[4..4 + to_read]);
 
-            next_overflow = contents.read_u32(0);
+            next_overflow = pageContent.read_u32(0);
             left_to_read -= to_read;
         }
         assert_eq!(left_to_read, 0);
@@ -1014,7 +1022,7 @@ pub fn begin_read_wal_header(io: &Rc<dyn File>) -> Result<Arc<RwLock<WalHeader>>
         let header = header.clone();
         finish_read_wal_header(buf, header).unwrap();
     });
-    let c = Rc::new(Completion::Read(ReadCompletion::new(buf, complete)));
+    let c = Rc::new(CompletionEnum::Read(ReadCompletion::new(buf, complete)));
     io.pread(0, c)?;
     Ok(result)
 }
@@ -1038,12 +1046,12 @@ pub fn begin_read_wal_frame(
     io: &Rc<dyn File>,
     offset: usize,
     buffer_pool: Rc<BufferPool>,
-    page: PageRef,
+    page: PageArc,
 ) -> Result<()> {
     log::trace!(
         "begin_read_wal_frame(offset={}, page={})",
         offset,
-        page.get().id
+        page.getMutInner().id
     );
     let buf = buffer_pool.get();
     let drop_fn = Rc::new(move |buf| {
@@ -1056,7 +1064,7 @@ pub fn begin_read_wal_frame(
         let frame = frame.clone();
         finish_read_page(2, buf, frame).unwrap();
     });
-    let c = Rc::new(Completion::Read(ReadCompletion::new(buf, complete)));
+    let c = Rc::new(CompletionEnum::Read(ReadCompletion::new(buf, complete)));
     io.pread(offset, c)?;
     Ok(())
 }
@@ -1064,14 +1072,14 @@ pub fn begin_read_wal_frame(
 pub fn begin_write_wal_frame(
     io: &Rc<dyn File>,
     offset: usize,
-    page: &PageRef,
+    page: &PageArc,
     db_size: u32,
     write_counter: Rc<RefCell<usize>>,
     wal_header: &WalHeader,
     checksums: (u32, u32),
 ) -> Result<(u32, u32)> {
     let page_finish = page.clone();
-    let page_id = page.get().id;
+    let page_id = page.getMutInner().id;
     trace!("begin_write_wal_frame(offset={}, page={})", offset, page_id);
 
     let mut header = WalFrameHeader {
@@ -1083,8 +1091,8 @@ pub fn begin_write_wal_frame(
         checksum_2: 0,
     };
     let (buffer, checksums) = {
-        let page = page.get();
-        let contents = page.contents.as_ref().unwrap();
+        let page = page.getMutInner();
+        let contents = page.pageContent.as_ref().unwrap();
         let drop_fn = Rc::new(|_buf| {});
 
         let mut buffer = Buffer::allocate(
@@ -1099,7 +1107,7 @@ pub fn begin_write_wal_frame(
             let contents_buf = contents.as_ptr();
             let expects_be = wal_header.magic & 1; // LSB is set on big endian checksums
             let use_native_endian = cfg!(target_endian = "big") as u32 == expects_be; // check if checksum
-                                                                                      // type and native type is the same so that we know when to swap bytes
+            // type and native type is the same so that we know when to swap bytes
             let checksums = checksum_wal(&buf[0..8], wal_header, checksums, use_native_endian);
             let checksums = checksum_wal(contents_buf, wal_header, checksums, use_native_endian);
             header.checksum_1 = checksums.0;
@@ -1132,7 +1140,7 @@ pub fn begin_write_wal_frame(
             }
         })
     };
-    let c = Rc::new(Completion::Write(WriteCompletion::new(write_complete)));
+    let c = Rc::new(CompletionEnum::Write(WriteCompletion::new(write_complete)));
     io.pwrite(offset, buffer.clone(), c)?;
     Ok(checksums)
 }
@@ -1165,7 +1173,7 @@ pub fn begin_write_wal_header(io: &Rc<dyn File>, header: &WalHeader) -> Result<(
             }
         })
     };
-    let c = Rc::new(Completion::Write(WriteCompletion::new(write_complete)));
+    let c = Rc::new(CompletionEnum::Write(WriteCompletion::new(write_complete)));
     io.pwrite(0, buffer.clone(), c)?;
     Ok(())
 }

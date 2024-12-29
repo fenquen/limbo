@@ -27,8 +27,8 @@ use crate::error::{LimboError, SQLITE_CONSTRAINT_PRIMARYKEY};
 use crate::function::{AggFunc, FuncCtx, MathFunc, MathFuncArity, ScalarFunc};
 use crate::pseudo::PseudoCursor;
 use crate::schema::Table;
-use crate::storage::sqlite3_ondisk::DatabaseHeader;
-use crate::storage::{btree::BTreeCursor, pager::Pager};
+use crate::storage::sqlite3_ondisk::DbHeader;
+use crate::storage::{btree::BTreeCursor, page::Pager};
 use crate::types::{
     AggContext, Cursor, CursorResult, OwnedRecord, OwnedValue, Record, SeekKey, SeekOp,
 };
@@ -622,7 +622,7 @@ pub struct Program {
     pub max_registers: usize,
     pub insns: Vec<Insn>,
     pub cursor_ref: Vec<(Option<String>, Option<Table>)>,
-    pub database_header: Rc<RefCell<DatabaseHeader>>,
+    pub database_header: Rc<RefCell<DbHeader>>,
     pub comments: HashMap<BranchOffset, &'static str>,
     pub connection: Weak<Conn>,
     pub auto_commit: bool,
@@ -647,11 +647,7 @@ impl Program {
         }
     }
 
-    pub fn step<'a>(
-        &self,
-        state: &'a mut ProgramState,
-        pager: Rc<Pager>,
-    ) -> Result<StepResult<'a>> {
+    pub fn step<'a>(&self, state: &'a mut ProgramState, pager: Rc<Pager>) -> Result<StepResult<'a>> {
         loop {
             let insn = &self.insns[state.pc as usize];
             trace_insn(self, state.pc as InsnReference, insn);
@@ -3498,10 +3494,7 @@ fn exec_replace(source: &OwnedValue, pattern: &OwnedValue, replacement: &OwnedVa
     // then return X unchanged. If Z is not initially a string, it is cast to a UTF-8 string prior to processing.
 
     // If any of the arguments is NULL, the result is NULL.
-    if matches!(source, OwnedValue::Null)
-        || matches!(pattern, OwnedValue::Null)
-        || matches!(replacement, OwnedValue::Null)
-    {
+    if matches!(source, OwnedValue::Null) || matches!(pattern, OwnedValue::Null) || matches!(replacement, OwnedValue::Null) {
         return OwnedValue::Null;
     }
 

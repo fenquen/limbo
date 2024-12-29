@@ -335,7 +335,7 @@ pub enum Expr {
         table: usize,
         /// the z in `x.y.z`. index of the column in the table.
         column: usize,
-        /// is the column a rowid alias
+        /// is primary key  is the column a rowid alias
         is_rowid_alias: bool,
     },
     /// `IN`

@@ -2,7 +2,7 @@ use crate::error::LimboError;
 use crate::io::common;
 use crate::{io, Result};
 
-use super::{Completion, File, OpenFlags, IO};
+use super::{CompletionEnum, File, OpenFlags, IO};
 use libc::{c_short, fcntl, flock, F_SETLK};
 use log::trace;
 use polling::{Event, Events, Poller};
@@ -31,7 +31,7 @@ impl DarwinIO {
 }
 
 impl IO for DarwinIO {
-    fn open_file(&self, path: &str, flags: OpenFlags, _direct: bool) -> Result<Rc<dyn File>> {
+    fn openFile(&self, path: &str, flags: OpenFlags, _direct: bool) -> Result<Rc<dyn File>> {
         trace!("open_file(path = {})", path);
         let file = std::fs::File::options().read(true).custom_flags(libc::O_NONBLOCK)
             .write(true)
@@ -49,7 +49,7 @@ impl IO for DarwinIO {
         Ok(darwin_file)
     }
 
-    fn run_once(&self) -> Result<()> {
+    fn runOnce(&self) -> Result<()> {
         if self.callbacks.borrow().is_empty() {
             return Ok(());
         }
@@ -66,9 +66,9 @@ impl IO for DarwinIO {
                     match cf {
                         CompletionCallback::Read(ref file, ref c, pos) => {
                             let mut file = file.borrow_mut();
-                            let c: &Completion = c;
+                            let c: &CompletionEnum = c;
                             let r = match c {
-                                Completion::Read(r) => r,
+                                CompletionEnum::Read(r) => r,
                                 _ => unreachable!(),
                             };
                             let mut buf = r.buf_mut();
@@ -116,10 +116,10 @@ impl IO for DarwinIO {
 }
 
 enum CompletionCallback {
-    Read(Rc<RefCell<std::fs::File>>, Rc<Completion>, usize),
+    Read(Rc<RefCell<std::fs::File>>, Rc<CompletionEnum>, usize),
     Write(
         Rc<RefCell<std::fs::File>>,
-        Rc<Completion>,
+        Rc<CompletionEnum>,
         Rc<RefCell<crate::Buffer>>,
         usize,
     ),
@@ -185,11 +185,11 @@ impl File for DarwinFile {
         Ok(())
     }
 
-    fn pread(&self, pos: usize, c: Rc<Completion>) -> Result<()> {
+    fn pread(&self, pos: usize, c: Rc<CompletionEnum>) -> Result<()> {
         let file = self.file.borrow();
         let result = {
             let r = match &(*c) {
-                Completion::Read(r) => r,
+                CompletionEnum::Read(r) => r,
                 _ => unreachable!(),
             };
             let mut buf = r.buf_mut();
@@ -225,7 +225,7 @@ impl File for DarwinFile {
         &self,
         pos: usize,
         buffer: Rc<RefCell<crate::Buffer>>,
-        c: Rc<Completion>,
+        c: Rc<CompletionEnum>,
     ) -> Result<()> {
         let file = self.file.borrow();
         let result = {
@@ -258,7 +258,7 @@ impl File for DarwinFile {
         }
     }
 
-    fn sync(&self, c: Rc<Completion>) -> Result<()> {
+    fn sync(&self, c: Rc<CompletionEnum>) -> Result<()> {
         let file = self.file.borrow();
         let result = rustix::fs::fsync(file.as_fd());
         match result {

@@ -2,7 +2,7 @@ use std::{cell::RefCell, collections::HashMap, ptr::NonNull};
 
 use log::debug;
 
-use super::pager::PageRef;
+use super::page::PageArc;
 
 // In limbo, page cache is shared by default, meaning that multiple frames from WAL can reside in
 // the cache, meaning, we need a way to differentiate between pages cached in different
@@ -10,17 +10,19 @@ use super::pager::PageRef;
 // connections have different max_frames, they might or not have different frame read from WAL.
 //
 // WAL was introduced after Shared cache in SQLite, so this is why these two features don't work
-// well together because pages with different snapshots may collide.
-#[derive(Debug, Eq, Hash, PartialEq, Clone)]
-pub struct PageCacheKey {
-    pgno: usize,
-    max_frame: Option<u64>,
+// well together because pages with different snapshots may collide
+
+pub struct DumbLruPageCache {
+    capacity: usize,
+    map: RefCell<HashMap<PageCacheKey, NonNull<PageCacheEntry>>>,
+    head: RefCell<Option<NonNull<PageCacheEntry>>>,
+    tail: RefCell<Option<NonNull<PageCacheEntry>>>,
 }
 
 #[allow(dead_code)]
 struct PageCacheEntry {
     key: PageCacheKey,
-    page: PageRef,
+    page: PageArc,
     prev: Option<NonNull<PageCacheEntry>>,
     next: Option<NonNull<PageCacheEntry>>,
 }
@@ -31,20 +33,18 @@ impl PageCacheEntry {
     }
 }
 
-pub struct DumbLruPageCache {
-    capacity: usize,
-    map: RefCell<HashMap<PageCacheKey, NonNull<PageCacheEntry>>>,
-    head: RefCell<Option<NonNull<PageCacheEntry>>>,
-    tail: RefCell<Option<NonNull<PageCacheEntry>>>,
+#[derive(Debug, Eq, Hash, PartialEq, Clone)]
+pub struct PageCacheKey {
+    pgno: usize,
+    max_frame: Option<u64>,
 }
-unsafe impl Send for DumbLruPageCache {}
-unsafe impl Sync for DumbLruPageCache {}
 
 impl PageCacheKey {
     pub fn new(pgno: usize, max_frame: Option<u64>) -> Self {
         Self { pgno, max_frame }
     }
 }
+
 impl DumbLruPageCache {
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -59,7 +59,7 @@ impl DumbLruPageCache {
         self.map.borrow().contains_key(key)
     }
 
-    pub fn insert(&mut self, key: PageCacheKey, value: PageRef) {
+    pub fn insert(&mut self, key: PageCacheKey, value: PageArc) {
         self._delete(key.clone(), false);
         debug!("cache_insert(key={:?})", key);
         let mut entry = Box::new(PageCacheEntry {
@@ -102,7 +102,7 @@ impl DumbLruPageCache {
         ptr.copied()
     }
 
-    pub fn get(&mut self, key: &PageCacheKey) -> Option<PageRef> {
+    pub fn get(&mut self, key: &PageCacheKey) -> Option<PageArc> {
         debug!("cache_get(key={:?})", key);
         let ptr = self.get_ptr(key);
         ptr?;
@@ -125,8 +125,8 @@ impl DumbLruPageCache {
             // evict buffer
             let page = &entry.page;
             page.clear_loaded();
-            debug!("cleaning up page {}", page.get().id);
-            let _ = page.get().contents.take();
+            debug!("cleaning up page {}", page.getMutInner().id);
+            let _ = page.getMutInner().pageContent.take();
         }
 
         let (next, prev) = unsafe {
@@ -189,3 +189,6 @@ impl DumbLruPageCache {
         }
     }
 }
+
+unsafe impl Send for DumbLruPageCache {}
+unsafe impl Sync for DumbLruPageCache {}

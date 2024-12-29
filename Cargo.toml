@@ -5,7 +5,6 @@ resolver = "2"
 members = [
     "cli",
     "core",
-    "simulator",
 ]
 
 [workspace.package]

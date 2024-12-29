@@ -1,4 +1,4 @@
-use super::{Buffer, Completion, File, OpenFlags, IO};
+use super::{Buffer, CompletionEnum, File, OpenFlags, IO};
 use crate::Result;
 
 use std::{
@@ -42,13 +42,13 @@ impl MemoryIO {
 }
 
 impl IO for Arc<MemoryIO> {
-    fn open_file(&self, _path: &str, _flags: OpenFlags, _direct: bool) -> Result<Rc<dyn File>> {
+    fn openFile(&self, _path: &str, _flags: OpenFlags, _direct: bool) -> Result<Rc<dyn File>> {
         Ok(Rc::new(MemoryFile {
             io: Arc::clone(self),
         }))
     }
 
-    fn run_once(&self) -> Result<()> {
+    fn runOnce(&self) -> Result<()> {
         // nop
         Ok(())
     }
@@ -77,9 +77,9 @@ impl File for MemoryFile {
         Ok(())
     }
 
-    fn pread(&self, pos: usize, c: Rc<Completion>) -> Result<()> {
+    fn pread(&self, pos: usize, c: Rc<CompletionEnum>) -> Result<()> {
         let r = match &*c {
-            Completion::Read(r) => r,
+            CompletionEnum::Read(r) => r,
             _ => unreachable!(),
         };
         let buf_len = r.buf().len();
@@ -126,7 +126,7 @@ impl File for MemoryFile {
         Ok(())
     }
 
-    fn pwrite(&self, pos: usize, buffer: Rc<RefCell<Buffer>>, c: Rc<Completion>) -> Result<()> {
+    fn pwrite(&self, pos: usize, buffer: Rc<RefCell<Buffer>>, c: Rc<CompletionEnum>) -> Result<()> {
         let buf = buffer.borrow();
         let buf_len = buf.len();
         if buf_len == 0 {
@@ -164,7 +164,7 @@ impl File for MemoryFile {
         Ok(())
     }
 
-    fn sync(&self, c: Rc<Completion>) -> Result<()> {
+    fn sync(&self, c: Rc<CompletionEnum>) -> Result<()> {
         // no-op
         c.complete(0);
         Ok(())

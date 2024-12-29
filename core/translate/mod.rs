@@ -21,19 +21,19 @@ use std::rc::{Rc, Weak};
 use std::str::FromStr;
 
 use crate::schema::Schema;
-use crate::storage::pager::Pager;
-use crate::storage::sqlite3_ondisk::{DatabaseHeader, MIN_PAGE_CACHE_SIZE};
+use crate::storage::page::Pager;
+use crate::storage::sqlite3_ondisk::{DbHeader, MIN_PAGE_CACHE_SIZE};
 use crate::vdbe::{builder::ProgramBuilder, Insn, Program};
 use crate::{bail_parse_error, Conn, Result};
 use insert::translate_insert;
-use select::translate_select;
+use select::translateSel;
 use sqlite3_parser::ast::fmt::ToTokens;
 use sqlite3_parser::ast::{self, PragmaName};
 
 /// Translate SQL statement into bytecode program
 pub fn translate(schema: &Schema,
                  stmt: ast::Stmt,
-                 database_header: Rc<RefCell<DatabaseHeader>>,
+                 database_header: Rc<RefCell<DbHeader>>,
                  pager: Rc<Pager>,
                  connection: Weak<Conn>) -> Result<Program> {
     match stmt {
@@ -74,7 +74,7 @@ pub fn translate(schema: &Schema,
             database_header,
             connection,
         ),
-        ast::Stmt::Select(select) => translate_select(schema, select, database_header, connection),
+        ast::Stmt::Select(select) => translateSel(schema, select, database_header, connection),
         ast::Stmt::Pragma(name, body) => translate_pragma(&name, body, database_header, pager, connection),
         ast::Stmt::AlterTable(_, _) => bail_parse_error!("ALTER TABLE not supported yet"),
         ast::Stmt::Analyze(_) => bail_parse_error!("ANALYZE not supported yet"),
@@ -143,7 +143,7 @@ fn translate_create_table(
     tbl_name: ast::QualifiedName,
     body: ast::CreateTableBody,
     if_not_exists: bool,
-    database_header: Rc<RefCell<DatabaseHeader>>,
+    database_header: Rc<RefCell<DbHeader>>,
     connection: Weak<Conn>,
     schema: &Schema,
 ) -> Result<Program> {
@@ -285,7 +285,7 @@ fn translate_create_table(
 fn translate_pragma(
     name: &ast::QualifiedName,
     body: Option<ast::PragmaBody>,
-    database_header: Rc<RefCell<DatabaseHeader>>,
+    database_header: Rc<RefCell<DbHeader>>,
     pager: Rc<Pager>,
     connection: Weak<Conn>,
 ) -> Result<Program> {
@@ -335,7 +335,7 @@ fn translate_pragma(
 fn update_pragma(
     name: &str,
     value: ast::Expr,
-    header: Rc<RefCell<DatabaseHeader>>,
+    header: Rc<RefCell<DbHeader>>,
     pager: Rc<Pager>,
     program: &mut ProgramBuilder,
 ) -> Result<()> {
@@ -370,7 +370,7 @@ fn update_pragma(
 
 fn query_pragma(
     name: &str,
-    database_header: Rc<RefCell<DatabaseHeader>>,
+    database_header: Rc<RefCell<DbHeader>>,
     program: &mut ProgramBuilder,
 ) -> Result<()> {
     let pragma = match PragmaName::from_str(name) {
@@ -403,7 +403,7 @@ fn query_pragma(
     Ok(())
 }
 
-fn update_cache_size(value: i64, header: Rc<RefCell<DatabaseHeader>>, pager: Rc<Pager>) {
+fn update_cache_size(value: i64, header: Rc<RefCell<DbHeader>>, pager: Rc<Pager>) {
     let mut cache_size_unformatted: i64 = value;
     let mut cache_size = if cache_size_unformatted < 0 {
         let kb = cache_size_unformatted.abs() * 1024;

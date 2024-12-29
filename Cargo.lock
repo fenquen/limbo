@@ -49,15 +49,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anarchist-readable-name-generator-lib"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18a1e15a87b13ae79e04e07b3714fc41d5f6993dff11662fdbe0b207c6ad0fe0"
-dependencies = [
- "rand",
-]
-
-[[package]]
 name = "android-tzdata"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -946,19 +937,6 @@ dependencies = [
  "serde",
  "sqlite3-parser",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "limbo_sim"
-version = "0.0.10"
-dependencies = [
- "anarchist-readable-name-generator-lib",
- "env_logger 0.10.2",
- "limbo_core",
- "log",
- "rand",
- "rand_chacha",
- "tempfile",
 ]
 
 [[package]]
