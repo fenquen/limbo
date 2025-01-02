@@ -9,205 +9,198 @@ use crate::error::SQLITE_CONSTRAINT_PRIMARYKEY;
 use crate::{
     schema::{Schema, Table},
     storage::sqlite3_ondisk::DbHeader,
-    translate::expr::translate_expr,
-    vdbe::{builder::ProgramBuilder, Insn, Program},
+    translate::expr::translateExpr,
+    vdbe::{program_builder::ProgramBuilder, Insn, Program},
 };
 use crate::{Conn, Result};
 
 #[allow(clippy::too_many_arguments)]
-pub fn translate_insert(schema: &Schema,
-                        with: &Option<With>,
-                        or_conflict: &Option<ResolveType>,
-                        tbl_name: &QualifiedName,
-                        _columns: &Option<DistinctNames>,
-                        body: &InsertBody,
-                        _returning: &Option<Vec<ResultColumn>>,
-                        database_header: Rc<RefCell<DbHeader>>,
-                        connection: Weak<Conn>) -> Result<Program> {
-    assert!(with.is_none());
-    assert!(or_conflict.is_none());
+pub fn translateInsert(schema: &Schema,
+                       tblName: &QualifiedName,
+                       _columns: &Option<DistinctNames>,
+                       body: &InsertBody,
+                       _returning: &Option<Vec<ResultColumn>>,
+                       database_header: Rc<RefCell<DbHeader>>,
+                       connection: Weak<Conn>) -> Result<Program> {
+    let mut programBuilder = ProgramBuilder::new();
 
-    let mut program = ProgramBuilder::new();
-    let init_label = program.allocate_label();
-    program.emit_insn_with_label_dependency(
-        Insn::Init {
-            target_pc: init_label,
-        },
-        init_label,
-    );
-    let start_offset = program.offset();
+    let initLabel = programBuilder.allocateLabel();
 
-    // open table
-    let table_name = &tbl_name.name;
+    programBuilder.addInsnWithLabelDependency(Insn::Init { target_pc: initLabel }, initLabel);
 
-    let table = match schema.get_table(table_name.0.as_str()) {
-        Some(table) => table,
-        None => crate::bail_corrupt_error!("Parse error: no such table: {}", table_name),
+    let startPc = programBuilder.nextPc();
+
+    let tblName = tblName.name.0.to_owned();
+
+    let table = match schema.getTbl(&tblName) {
+        Some(table) => Rc::new(Table::BTree(table)),
+        None => crate::bail_corrupt_error!("Parse error: no such table: {}", tblName),
     };
-    let table = Rc::new(Table::BTree(table));
-    let cursor_id = program.alloc_cursor_id(
-        Some(table_name.0.clone()),
-        Some(table.clone().deref().clone()),
-    );
-    let root_page = match table.as_ref() {
-        Table::BTree(btree) => btree.root_page,
-        Table::Index(index) => index.root_page,
+
+    let cursorId = programBuilder.allocCursorId(Some(tblName), Some(table.clone().deref().clone()));
+
+    let rootPage = match table.as_ref() {
+        Table::BTree(btreeTbl) => btreeTbl.rootPage,
+        Table::Index(index) => index.rootPage,
         Table::Pseudo(_) => todo!(),
     };
 
-    let mut num_cols = table.columns().len();
-    if table.has_rowid() {
-        num_cols += 1;
-    }
+    let colCount = {
+        let mut colCount = table.columns().len();
+
+        if table.hasRowId() {
+            colCount += 1;
+        }
+
+        colCount
+    };
+
     // column_registers_start[0] == rowid if has rowid
-    let column_registers_start = program.alloc_registers(num_cols);
+    let colRegStart = programBuilder.allocRegisters(colCount);
 
     // Coroutine for values
-    let yield_reg = program.alloc_register();
-    let jump_on_definition_label = program.allocate_label();
+    let yieldReg = programBuilder.allocRegister();
+    let jump_on_definition_label = programBuilder.allocateLabel();
     {
-        program.emit_insn_with_label_dependency(
+        programBuilder.addInsnWithLabelDependency(
             Insn::InitCoroutine {
-                yield_reg,
+                yieldReg,
                 jump_on_definition: jump_on_definition_label,
-                start_offset: program.offset() + 1,
+                start_offset: programBuilder.nextPc() + 1,
             },
             jump_on_definition_label,
         );
+
         match body {
+            // insert into select 的
             InsertBody::Select(select, None) => match &select.body.select {
-                sqlite3_parser::ast::OneSelect::Select {
-                    distinctness: _,
-                    columns: _,
-                    from: _,
-                    where_clause: _,
-                    group_by: _,
-                    window_clause: _,
-                } => todo!(),
-                sqlite3_parser::ast::OneSelect::Values(values) => {
-                    for value in values {
-                        for (col, expr) in value.iter().enumerate() {
-                            let mut col = col;
-                            if table.has_rowid() {
-                                col += 1;
-                            }
-                            translate_expr(
-                                &mut program,
-                                None,
-                                expr,
-                                column_registers_start + col,
-                                None,
-                            )?;
+                sqlite3_parser::ast::OneSelect::Values(valVecVec) => {
+                    for valVec in valVecVec {
+                        for (col, expr) in valVec.iter().enumerate() {
+                            let col = {
+                                if table.hasRowId() {
+                                    col + 1
+                                } else {
+                                    col
+                                }
+                            };
+
+                            translateExpr(&mut programBuilder, None, expr, colRegStart + col, None)?;
                         }
-                        program.emit_insn(Insn::Yield {
-                            yield_reg,
-                            end_offset: 0,
-                        });
+
+                        programBuilder.addInsn0(Insn::Yield { yieldReg, end_offset: 0 });
                     }
                 }
+                _ => todo!()
             },
-            InsertBody::DefaultValues => todo!("default values not yet supported"),
             _ => todo!(),
         }
-        program.emit_insn(Insn::EndCoroutine { yield_reg });
+
+        programBuilder.addInsn0(Insn::EndCoroutine { yieldReg });
     }
 
-    program.resolve_label(jump_on_definition_label, program.offset());
-    program.emit_insn(Insn::OpenWriteAsync {
-        cursor_id,
-        root_page,
-    });
-    program.emit_insn(Insn::OpenWriteAwait {});
+    programBuilder.resolveLabel(jump_on_definition_label, programBuilder.nextPc());
+
+    programBuilder.addInsn0(Insn::OpenWriteAsync { cursorId, rootPage });
+    programBuilder.addInsn0(Insn::OpenWriteAwait {});
 
     // Main loop
-    let record_register = program.alloc_register();
-    let halt_label = program.allocate_label();
-    let loop_start_offset = program.offset();
-    program.emit_insn_with_label_dependency(
-        Insn::Yield {
-            yield_reg,
-            end_offset: halt_label,
-        },
-        halt_label,
-    );
+    let recReg = programBuilder.allocRegister();
 
-    if table.has_rowid() {
-        let row_id_reg = column_registers_start;
+    let haltLabel = programBuilder.allocateLabel();
+
+    let loopStartPc = programBuilder.nextPc();
+
+    programBuilder.addInsnWithLabelDependency(Insn::Yield {
+        yieldReg,
+        end_offset: haltLabel,
+    }, haltLabel);
+
+    if table.hasRowId() {
+        let rowIdReg = colRegStart;
+
         if let Some(rowid_alias_column) = table.get_rowid_alias_column() {
-            let key_reg = column_registers_start + 1 + rowid_alias_column.0;
+            let key_reg = colRegStart + 1 + rowid_alias_column.0;
             // copy key to rowid
-            program.emit_insn(Insn::Copy {
+            programBuilder.addInsn0(Insn::Copy {
                 src_reg: key_reg,
-                dst_reg: row_id_reg,
+                dst_reg: rowIdReg,
                 amount: 0,
             });
-            program.emit_insn(Insn::SoftNull { reg: key_reg });
+            programBuilder.addInsn0(Insn::SoftNull { reg: key_reg });
         }
 
-        let notnull_label = program.allocate_label();
-        program.emit_insn_with_label_dependency(
+        let notnull_label = programBuilder.allocateLabel();
+        programBuilder.addInsnWithLabelDependency(
             Insn::NotNull {
-                reg: row_id_reg,
+                reg: rowIdReg,
                 target_pc: notnull_label,
             },
             notnull_label,
         );
-        program.emit_insn(Insn::NewRowid {
-            cursor: cursor_id,
-            rowid_reg: row_id_reg,
+
+        programBuilder.addInsn0(Insn::NewRowid {
+            cursorId,
+            rowid_reg: rowIdReg,
             prev_largest_reg: 0,
         });
 
-        program.resolve_label(notnull_label, program.offset());
-        program.emit_insn(Insn::MustBeInt { reg: row_id_reg });
-        let make_record_label = program.allocate_label();
-        program.emit_insn_with_label_dependency(
+        programBuilder.resolveLabel(notnull_label, programBuilder.nextPc());
+
+        programBuilder.addInsn0(Insn::MustBeInt { reg: rowIdReg });
+
+        let labelMakeRecord = programBuilder.allocateLabel();
+
+        programBuilder.addInsnWithLabelDependency(
             Insn::NotExists {
-                cursor: cursor_id,
-                rowid_reg: row_id_reg,
-                target_pc: make_record_label,
+                cursor: cursorId,
+                rowid_reg: rowIdReg,
+                target_pc: labelMakeRecord,
             },
-            make_record_label,
+            labelMakeRecord,
         );
+
         // TODO: rollback
-        program.emit_insn(Insn::Halt {
+        programBuilder.addInsn0(Insn::Halt {
             err_code: SQLITE_CONSTRAINT_PRIMARYKEY,
-            description: format!(
-                "{}.{}",
-                table.get_name(),
-                table.column_index_to_name(0).unwrap()
-            ),
+            description: format!("{}.{}", table.get_name(), table.column_index_to_name(0).unwrap()),
         });
-        program.resolve_label(make_record_label, program.offset());
-        program.emit_insn(Insn::MakeRecord {
-            start_reg: column_registers_start + 1,
-            count: num_cols - 1,
-            dest_reg: record_register,
+
+        programBuilder.resolveLabel(labelMakeRecord, programBuilder.nextPc());
+
+        programBuilder.addInsn0(Insn::MakeRecord {
+            startReg: colRegStart + 1,
+            count: colCount - 1,
+            destReg: recReg,
         });
-        program.emit_insn(Insn::InsertAsync {
-            cursor: cursor_id,
-            key_reg: column_registers_start,
-            record_reg: record_register,
+
+        programBuilder.addInsn0(Insn::InsertAsync {
+            cursorId,
+            keyReg: colRegStart,
+            recReg,
             flag: 0,
         });
-        program.emit_insn(Insn::InsertAwait { cursor_id });
+
+        programBuilder.addInsn0(Insn::InsertAwait { cursor_id: cursorId });
     }
 
-    program.emit_insn(Insn::Goto {
-        target_pc: loop_start_offset,
-    });
+    // 循环loop的
+    programBuilder.addInsn0(Insn::Goto { targetPc: loopStartPc });
 
-    program.resolve_label(halt_label, program.offset());
-    program.emit_insn(Insn::Halt {
-        err_code: 0,
-        description: String::new(),
-    });
-    program.resolve_label(init_label, program.offset());
-    program.emit_insn(Insn::Transaction { write: true });
-    program.emit_constant_insns();
-    program.emit_insn(Insn::Goto {
-        target_pc: start_offset,
-    });
-    program.resolve_deferred_labels();
-    Ok(program.build(database_header, connection))
+    programBuilder.resolveLabel(haltLabel, programBuilder.nextPc());
+
+    programBuilder.addInsn0(Insn::Halt { err_code: 0, description: String::new() });
+
+    programBuilder.resolveLabel(initLabel, programBuilder.nextPc());
+
+    programBuilder.addInsn0(Insn::Transaction { write: true });
+
+    programBuilder.emit_constant_insns();
+
+    // 实现了循环效果
+    programBuilder.addInsn0(Insn::Goto { targetPc: startPc });
+
+    programBuilder.resolve_deferred_labels();
+
+    Ok(programBuilder.build(database_header, connection))
 }

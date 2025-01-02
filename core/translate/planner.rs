@@ -84,9 +84,8 @@ fn resolve_aggregates(expr: &ast::Expr, aggs: &mut Vec<Aggregate>) -> bool {
     }
 }
 
-/// Recursively resolve column references in an expression.
-/// Id, Qualified and DoublyQualified are converted to Column.
-fn bindColRef(expr: &mut ast::Expr, refTbls: &[BTreeTableRef]) -> Result<()> {
+/// 对sql中的以文本形式的colName进行分析得到更为丰富的信息
+fn bindColRef(expr: &mut ast::Expr, tblRefs: &[BTreeTableRef]) -> Result<()> {
     match expr {
         // id 是 literal 意义 对应 select a from table 的 a
         ast::Expr::Id(id) => {
@@ -98,7 +97,7 @@ fn bindColRef(expr: &mut ast::Expr, refTbls: &[BTreeTableRef]) -> Result<()> {
 
             let mut match_result = None;
 
-            for (tblIndex, tblRef) in refTbls.iter().enumerate() {
+            for (tblIndex, tblRef) in tblRefs.iter().enumerate() {
                 let colIndex = tblRef.table.columns.iter().position(|c| c.name.eq_ignore_ascii_case(&id.0));
                 if colIndex.is_some() {
                     if match_result.is_some() {
@@ -125,14 +124,14 @@ fn bindColRef(expr: &mut ast::Expr, refTbls: &[BTreeTableRef]) -> Result<()> {
             Ok(())
         }
         ast::Expr::Qualified(tbl, id) => {
-            let matching_tbl_idx = refTbls
+            let matching_tbl_idx = tblRefs
                 .iter()
                 .position(|t| t.table_identifier.eq_ignore_ascii_case(&tbl.0));
             if matching_tbl_idx.is_none() {
                 crate::bail_parse_error!("Table {} not found", tbl.0);
             }
             let tbl_idx = matching_tbl_idx.unwrap();
-            let col_idx = refTbls[tbl_idx]
+            let col_idx = tblRefs[tbl_idx]
                 .table
                 .columns
                 .iter()
@@ -140,7 +139,7 @@ fn bindColRef(expr: &mut ast::Expr, refTbls: &[BTreeTableRef]) -> Result<()> {
             if col_idx.is_none() {
                 crate::bail_parse_error!("Column {} not found", id.0);
             }
-            let col = refTbls[tbl_idx]
+            let col = tblRefs[tbl_idx]
                 .table
                 .columns
                 .get(col_idx.unwrap())
@@ -159,14 +158,14 @@ fn bindColRef(expr: &mut ast::Expr, refTbls: &[BTreeTableRef]) -> Result<()> {
             start,
             end,
         } => {
-            bindColRef(lhs, refTbls)?;
-            bindColRef(start, refTbls)?;
-            bindColRef(end, refTbls)?;
+            bindColRef(lhs, tblRefs)?;
+            bindColRef(start, tblRefs)?;
+            bindColRef(end, tblRefs)?;
             Ok(())
         }
         ast::Expr::Binary(expr, _operator, expr1) => {
-            bindColRef(expr, refTbls)?;
-            bindColRef(expr1, refTbls)?;
+            bindColRef(expr, tblRefs)?;
+            bindColRef(expr1, tblRefs)?;
             Ok(())
         }
         ast::Expr::Case {
@@ -175,19 +174,19 @@ fn bindColRef(expr: &mut ast::Expr, refTbls: &[BTreeTableRef]) -> Result<()> {
             else_expr,
         } => {
             if let Some(base) = base {
-                bindColRef(base, refTbls)?;
+                bindColRef(base, tblRefs)?;
             }
             for (when, then) in when_then_pairs {
-                bindColRef(when, refTbls)?;
-                bindColRef(then, refTbls)?;
+                bindColRef(when, tblRefs)?;
+                bindColRef(then, tblRefs)?;
             }
             if let Some(else_expr) = else_expr {
-                bindColRef(else_expr, refTbls)?;
+                bindColRef(else_expr, tblRefs)?;
             }
             Ok(())
         }
-        ast::Expr::Cast { expr, type_name: _ } => bindColRef(expr, refTbls),
-        ast::Expr::Collate(expr, _string) => bindColRef(expr, refTbls),
+        ast::Expr::Cast { expr, type_name: _ } => bindColRef(expr, tblRefs),
+        ast::Expr::Collate(expr, _string) => bindColRef(expr, tblRefs),
         ast::Expr::FunctionCall {
             name: _,
             distinctness: _,
@@ -197,7 +196,7 @@ fn bindColRef(expr: &mut ast::Expr, refTbls: &[BTreeTableRef]) -> Result<()> {
         } => {
             if let Some(args) = args {
                 for arg in args {
-                    bindColRef(arg, refTbls)?;
+                    bindColRef(arg, tblRefs)?;
                 }
             }
             Ok(())
@@ -208,10 +207,10 @@ fn bindColRef(expr: &mut ast::Expr, refTbls: &[BTreeTableRef]) -> Result<()> {
         ast::Expr::Exists(_) => todo!(),
         ast::Expr::FunctionCallStar { .. } => Ok(()),
         ast::Expr::InList { lhs, not: _, rhs } => {
-            bindColRef(lhs, refTbls)?;
+            bindColRef(lhs, tblRefs)?;
             if let Some(rhs) = rhs {
                 for arg in rhs {
-                    bindColRef(arg, refTbls)?;
+                    bindColRef(arg, tblRefs)?;
                 }
             }
             Ok(())
@@ -219,30 +218,30 @@ fn bindColRef(expr: &mut ast::Expr, refTbls: &[BTreeTableRef]) -> Result<()> {
         ast::Expr::InSelect { .. } => todo!(),
         ast::Expr::InTable { .. } => todo!(),
         ast::Expr::IsNull(expr) => {
-            bindColRef(expr, refTbls)?;
+            bindColRef(expr, tblRefs)?;
             Ok(())
         }
         ast::Expr::Like { lhs, rhs, .. } => {
-            bindColRef(lhs, refTbls)?;
-            bindColRef(rhs, refTbls)?;
+            bindColRef(lhs, tblRefs)?;
+            bindColRef(rhs, tblRefs)?;
             Ok(())
         }
         ast::Expr::Literal(_) => Ok(()),
         ast::Expr::Name(_) => todo!(),
         ast::Expr::NotNull(expr) => {
-            bindColRef(expr, refTbls)?;
+            bindColRef(expr, tblRefs)?;
             Ok(())
         }
         ast::Expr::Parenthesized(expr) => {
             for e in expr.iter_mut() {
-                bindColRef(e, refTbls)?;
+                bindColRef(e, tblRefs)?;
             }
             Ok(())
         }
         ast::Expr::Raise(_, _) => todo!(),
         ast::Expr::Subquery(_) => todo!(),
         ast::Expr::Unary(_, expr) => {
-            bindColRef(expr, refTbls)?;
+            bindColRef(expr, tblRefs)?;
             Ok(())
         }
         ast::Expr::Variable(_) => todo!(),
@@ -253,52 +252,52 @@ fn bindColRef(expr: &mut ast::Expr, refTbls: &[BTreeTableRef]) -> Result<()> {
 pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> {
     match select.body.select {
         ast::OneSelect::Select {
-            columns,
-            from,
-            where_clause,
-            mut group_by,
+            columns: resultCols,
+            from: fromClause,
+            where_clause: whereExpr,
+            group_by: mut groupBy,
             ..
         } => {
-            if columns.len() == 0 {
+            if resultCols.is_empty() {
                 crate::bail_parse_error!("SELECT without columns is not allowed");
             }
 
-            let mut operator_id_counter = OperatorIdCounter::new();
+            let mut operatorIdCounter = OperatorIdCounter::new();
 
-            let (source, referenced_tables) = parse_from(schema, from, &mut operator_id_counter)?;
+            let (srcOperator, tblRefs) = parseFromClause(schema, fromClause, &mut operatorIdCounter)?;
 
             let mut plan = Plan {
-                source,
-                result_columns: vec![],
+                srcOperator,
+                resultCols: vec![],
                 whereExprs: None,
                 group_by: None,
-                orderByExprs: None,
+                orderBys: None,
                 aggregates: vec![],
                 limit: None,
-                refTbls: referenced_tables,
+                tblRefs,
                 indexes: schema.indexes.clone().into_values().flatten().collect(),
-                contains_constant_false_condition: false,
+                containsConstantFalseCondition: false,
             };
 
             // Parse the WHERE clause
-            if let Some(w) = where_clause {
+            if let Some(w) = whereExpr {
                 let mut predicates = vec![];
                 break_predicate_at_and_boundaries(w, &mut predicates);
                 for expr in predicates.iter_mut() {
-                    bindColRef(expr, &plan.refTbls)?;
+                    bindColRef(expr, &plan.tblRefs)?;
                 }
                 plan.whereExprs = Some(predicates);
             }
 
             let mut aggregate_expressions = Vec::new();
 
-            for column in columns.clone() {
+            for column in resultCols.clone() {
                 match column {
-                    ResultColumn::Star => plan.source.select_star(&mut plan.result_columns),
+                    ResultColumn::Star => plan.srcOperator.select_star(&mut plan.resultCols),
                     ResultColumn::TableStar(name) => {
                         let name_normalized = normalize_ident(name.0.as_str());
                         let referenced_table =
-                            plan.refTbls.iter().find(|t| t.table_identifier == name_normalized);
+                            plan.tblRefs.iter().find(|t| t.table_identifier == name_normalized);
 
                         if referenced_table.is_none() {
                             crate::bail_parse_error!("Table {} not found", name.0);
@@ -306,7 +305,7 @@ pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> 
 
                         let table_reference = referenced_table.unwrap();
                         for (idx, col) in table_reference.table.columns.iter().enumerate() {
-                            plan.result_columns.push(ResultSetColumn {
+                            plan.resultCols.push(ResultSetColumn {
                                 expr: ast::Expr::Column {
                                     database: None, // TODO: support different databases
                                     table: table_reference.table_index,
@@ -319,7 +318,7 @@ pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> 
                     }
                     // select a from table 的 a
                     ResultColumn::Expr(mut expr, _) => {
-                        bindColRef(&mut expr, &plan.refTbls)?;
+                        bindColRef(&mut expr, &plan.tblRefs)?;
 
                         match &expr {
                             ast::Expr::FunctionCall { name, args, .. } => {
@@ -337,7 +336,7 @@ pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> 
                                             original_expr: expr.clone(),
                                         };
                                         aggregate_expressions.push(agg.clone());
-                                        plan.result_columns.push(ResultSetColumn {
+                                        plan.resultCols.push(ResultSetColumn {
                                             expr: expr.clone(),
                                             contains_aggregates: true,
                                         });
@@ -345,7 +344,7 @@ pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> 
                                     Ok(_) => {
                                         let contains_aggregates =
                                             resolve_aggregates(&expr, &mut aggregate_expressions);
-                                        plan.result_columns.push(ResultSetColumn {
+                                        plan.resultCols.push(ResultSetColumn {
                                             expr: expr.clone(),
                                             contains_aggregates,
                                         });
@@ -362,7 +361,7 @@ pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> 
                                     };
 
                                     aggregate_expressions.push(agg.clone());
-                                    plan.result_columns.push(ResultSetColumn {
+                                    plan.resultCols.push(ResultSetColumn {
                                         expr: expr.clone(),
                                         contains_aggregates: true,
                                     });
@@ -373,7 +372,7 @@ pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> 
                             expr => {
                                 let contains_aggregates = resolve_aggregates(expr, &mut aggregate_expressions);
 
-                                plan.result_columns.push(ResultSetColumn {
+                                plan.resultCols.push(ResultSetColumn {
                                     expr: expr.clone(),
                                     contains_aggregates,
                                 });
@@ -383,9 +382,9 @@ pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> 
                 }
             }
 
-            if let Some(mut group_by) = group_by {
+            if let Some(mut group_by) = groupBy {
                 for expr in group_by.exprs.iter_mut() {
-                    bindColRef(expr, &plan.refTbls)?;
+                    bindColRef(expr, &plan.tblRefs)?;
                 }
 
                 plan.group_by = Some(GroupBy {
@@ -394,7 +393,7 @@ pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> 
                         let mut predicates = vec![];
                         break_predicate_at_and_boundaries(having, &mut predicates);
                         for expr in predicates.iter_mut() {
-                            bindColRef(expr, &plan.refTbls)?;
+                            bindColRef(expr, &plan.tblRefs)?;
                             let contains_aggregates =
                                 resolve_aggregates(expr, &mut aggregate_expressions);
                             if !contains_aggregates {
@@ -430,7 +429,7 @@ pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> 
                                 crate::bail_parse_error!("invalid column index: {}", column_number);
                             }
 
-                            match columns.get(column_number - 1) {
+                            match resultCols.get(column_number - 1) {
                                 Some(ResultColumn::Expr(e, _)) => e.clone(),
                                 None => crate::bail_parse_error!("invalid column index: {}", column_number),
                                 _ => todo!(),
@@ -439,7 +438,7 @@ pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> 
                             o.expr
                         };
 
-                    bindColRef(&mut expr, &plan.refTbls)?;
+                    bindColRef(&mut expr, &plan.tblRefs)?;
                     resolve_aggregates(&expr, &mut plan.aggregates);
 
                     key.push((
@@ -451,7 +450,7 @@ pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> 
                     ));
                 }
 
-                plan.orderByExprs = Some(key);
+                plan.orderBys = Some(key);
             }
 
             // Parse the LIMIT clause
@@ -465,7 +464,7 @@ pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> 
                 }
             }
 
-            // Return the unoptimized query plan
+            // unoptimized  plan
             Ok(plan)
         }
         _ => todo!(),
@@ -473,252 +472,273 @@ pub fn prepareSelPlan<'a>(schema: &Schema, select: ast::Select) -> Result<Plan> 
 }
 
 #[allow(clippy::type_complexity)]
-fn parse_from(schema: &Schema,
-              from: Option<FromClause>,
-              operator_id_counter: &mut OperatorIdCounter) -> Result<(SrcOperator, Vec<BTreeTableRef>)> {
-    if from.as_ref().and_then(|f| f.select.as_ref()).is_none() {
+fn parseFromClause(schema: &Schema,
+                   fromClause: Option<FromClause>,
+                   operator_id_counter: &mut OperatorIdCounter) -> Result<(SrcOperator, Vec<BTreeTableRef>)> {
+    if fromClause.as_ref().and_then(|f| f.select.as_ref()).is_none() {
         return Ok((SrcOperator::Nothing, vec![]));
     }
 
-    let from = from.unwrap();
+    let fromClause = fromClause.unwrap();
 
-    let first_table = match *from.select.unwrap() {
-        ast::SelectTable::Table(qualified_name, maybe_alias, _) => {
-            let Some(table) = schema.get_table(&qualified_name.name.0) else {
-                crate::bail_parse_error!("Table {} not found", qualified_name.name.0);
-            };
-            let alias = maybe_alias
-                .map(|a| match a {
-                    ast::As::As(id) => id,
-                    ast::As::Elided(id) => id,
-                })
-                .map(|a| a.0);
+    let firstTblRef =
+        match *fromClause.select.unwrap() {
+            ast::SelectTable::Table(qualifiedName, alias, _) => {
+                let Some(table) = schema.getTbl(&qualifiedName.name.0) else {
+                    crate::bail_parse_error!("Table {} not found", qualifiedName.name.0);
+                };
 
-            BTreeTableRef {
-                table: table.clone(),
-                table_identifier: alias.unwrap_or(qualified_name.name.0),
-                table_index: 0,
+                let alias = alias.map(|a| match a {
+                    ast::As::As(alias) => alias,
+                    ast::As::Elided(alias) => alias,
+                }).map(|a| a.0);
+
+                BTreeTableRef {
+                    table: table.clone(),
+                    table_identifier: alias.unwrap_or(qualifiedName.name.0),
+                    table_index: 0,
+                }
             }
-        }
-        _ => todo!(),
-    };
+            _ => todo!(),
+        };
 
-    let mut operator = SrcOperator::Scan {
-        tblRef: first_table.clone(),
+    let mut srcOperator = SrcOperator::Scan {
+        tblRef: firstTblRef.clone(),
         whereExprs: None,
         id: operator_id_counter.get_next_id(),
-        iter_dir: None,
+        iterDirection: None,
     };
 
-    let mut tables = vec![first_table];
+    let mut tblRefs = vec![firstTblRef];
 
-    let mut table_index = 1;
-    for join in from.joins.unwrap_or_default().into_iter() {
-        let (right, outer, using, predicates) = parse_join(schema, join, operator_id_counter, &mut tables, table_index)?;
-        operator = SrcOperator::Join {
-            left: Box::new(operator),
-            right: Box::new(right),
-            predicates,
+    // 后边起的tbl的index是1了
+    let mut tblIndex = 1;
+    for joinedSelTbl in fromClause.joins.unwrap_or_default().into_iter() {
+        let (rightSrcOperator, outer, using, whereExprs) =
+            parseJoin(schema,
+                      joinedSelTbl,
+                      operator_id_counter,
+                      &mut tblRefs,
+                      tblIndex)?;
+
+        // srcOperator不断累加
+        srcOperator = SrcOperator::Join {
+            left: Box::new(srcOperator),
+            right: Box::new(rightSrcOperator),
+            predicates: whereExprs,
             outer,
             using,
             id: operator_id_counter.get_next_id(),
         };
-        table_index += 1;
+
+        tblIndex += 1;
     }
 
-    Ok((operator, tables))
+    Ok((srcOperator, tblRefs))
 }
 
-fn parse_join(
-    schema: &Schema,
-    join: ast::JoinedSelectTable,
-    operator_id_counter: &mut OperatorIdCounter,
-    tables: &mut Vec<BTreeTableRef>,
-    table_index: usize,
-) -> Result<(
-    SrcOperator,
-    bool,
-    Option<ast::DistinctNames>,
-    Option<Vec<ast::Expr>>,
-)> {
+fn parseJoin(schema: &Schema,
+             joinedSelTbl: ast::JoinedSelectTable,
+             operatorIdCounter: &mut OperatorIdCounter,
+             tblRefsCollected: &mut Vec<BTreeTableRef>,
+             curTblIndex: usize) -> Result<(SrcOperator, bool, Option<ast::DistinctNames>, Option<Vec<ast::Expr>>)> {
     let ast::JoinedSelectTable {
-        operator,
+        operator: joinOperator,
         table,
-        constraint,
-    } = join;
+        constraint: joinConstraint,
+    } = joinedSelTbl;
 
-    let table = match table {
+    let tblRef = match table {
         ast::SelectTable::Table(qualified_name, maybe_alias, _) => {
-            let Some(table) = schema.get_table(&qualified_name.name.0) else {
+            let Some(table) = schema.getTbl(&qualified_name.name.0) else {
                 crate::bail_parse_error!("Table {} not found", qualified_name.name.0);
             };
-            let alias = maybe_alias
-                .map(|a| match a {
-                    ast::As::As(id) => id,
-                    ast::As::Elided(id) => id,
-                })
-                .map(|a| a.0);
+
+            let alias =
+                maybe_alias.map(|a| match a {
+                    ast::As::As(alias) => alias,
+                    ast::As::Elided(alias) => alias,
+                }).map(|a| a.0);
+
             BTreeTableRef {
                 table: table.clone(),
                 table_identifier: alias.unwrap_or(qualified_name.name.0),
-                table_index,
+                table_index: curTblIndex,
             }
         }
         _ => todo!(),
     };
 
-    tables.push(table.clone());
+    tblRefsCollected.push(tblRef.clone());
 
-    let (outer, natural) = match operator {
-        ast::JoinOperator::TypedJoin(Some(join_type)) => {
-            let is_outer = join_type.contains(JoinType::OUTER);
-            let is_natural = join_type.contains(JoinType::NATURAL);
-            (is_outer, is_natural)
+    let (isOuter, natureJoin) = match joinOperator {
+        ast::JoinOperator::TypedJoin(Some(joinType)) => {
+            let isOuter = joinType.contains(JoinType::OUTER);
+            let isNature = joinType.contains(JoinType::NATURAL);
+            (isOuter, isNature)
         }
         _ => (false, false),
     };
 
-    let mut using = None;
-    let mut predicates = None;
-
-    if natural && constraint.is_some() {
+    // 使用 using 的join : 其实是 join on 的简写 select from A join B using (id) 等同 select from A join B on A.id = B.id
+    // natural join: select from A natural join b, 是隐式的join 等同 select from A join B on A.id = b.id 因为id是两边否有的字段
+    // 和 JOIN... ON 或 JOIN... USING）不同，不需要显式地指定连接条件。会自动查找两个表中所有名称相同且数据类型相同的列，并以这些列作为连接条件进行连接
+    if natureJoin && joinConstraint.is_some() {
+        // 用了nature join 不能写on了
         crate::bail_parse_error!("NATURAL JOIN cannot be combined with ON or USING clause");
     }
 
-    let constraint = if natural {
-        // NATURAL JOIN is first transformed into a USING join with the common columns
-        let left_tables = &tables[..table_index];
-        assert!(!left_tables.is_empty());
-        let right_table = &tables[table_index];
-        let right_cols = &right_table.table.columns;
-        let mut distinct_names = None;
-        // TODO: O(n^2) maybe not great for large tables or big multiway joins
-        for right_col in right_cols.iter() {
-            let mut found_match = false;
-            for left_table in left_tables.iter() {
-                for left_col in left_table.table.columns.iter() {
-                    if left_col.name == right_col.name {
-                        if distinct_names.is_none() {
-                            distinct_names =
-                                Some(ast::DistinctNames::new(ast::Name(left_col.name.clone())));
-                        } else {
-                            distinct_names
-                                .as_mut()
-                                .unwrap()
-                                .insert(ast::Name(left_col.name.clone()))
-                                .unwrap();
+    let joinConstraint =
+        // 使用了nature join的话 需要找到实际 join的字段 以using的形式表达
+        if natureJoin {
+            let leftTblRefs = &tblRefsCollected[..curTblIndex];
+            assert!(!leftTblRefs.is_empty());
+
+            let rightCols = &tblRefsCollected[curTblIndex].table.columns;
+
+            let mut colNamesInUsing = None;
+
+            // TODO: O(n^2) maybe not great for large tables or big multiway joins
+            for rightCol in rightCols.iter() {
+                let mut found = false;
+
+                'a:
+                for leftTblRef in leftTblRefs.iter() {
+                    for leftCol in leftTblRef.table.columns.iter() {
+                        // 要得到两个表名字相同的col的
+                        if leftCol.name == rightCol.name {
+                            if colNamesInUsing.is_none() {
+                                colNamesInUsing = Some(ast::DistinctNames::new(ast::Name(leftCol.name.clone())));
+                            } else {
+                                colNamesInUsing.as_mut().unwrap().insert(ast::Name(leftCol.name.clone())).unwrap();
+                            }
+
+                            found = true;
+                            break 'a;
                         }
-                        found_match = true;
-                        break;
                     }
                 }
-                if found_match {
-                    break;
-                }
             }
-        }
-        if distinct_names.is_none() {
-            crate::bail_parse_error!("No columns found to NATURAL join on");
-        }
-        Some(ast::JoinConstraint::Using(distinct_names.unwrap()))
-    } else {
-        constraint
-    };
 
-    if let Some(constraint) = constraint {
-        match constraint {
+            if colNamesInUsing.is_none() {
+                crate::bail_parse_error!("No columns found to NATURAL join on");
+            }
+
+            Some(ast::JoinConstraint::Using(colNamesInUsing.unwrap()))
+        } else {
+            joinConstraint
+        };
+
+
+    // 对应 on a.id = b.id , using(id)
+    let mut joinOnExprs = None;
+
+    // select from a join b using (id) 等同 select from a join b on a.id = b.id
+    // using 使用的标识符列表
+    let mut colNamesInUsing = None;
+
+    if let Some(joinConstraint) = joinConstraint {
+        match joinConstraint {
+            // 普通的join on
             ast::JoinConstraint::On(expr) => {
                 let mut preds = vec![];
+
+                // 读取 a.id  = b.id and b.id = d.id 的 a.id = b.id, b.id = d.id
                 break_predicate_at_and_boundaries(expr, &mut preds);
+
                 for predicate in preds.iter_mut() {
-                    bindColRef(predicate, tables)?;
+                    bindColRef(predicate, tblRefsCollected)?;
                 }
-                predicates = Some(preds);
+
+                joinOnExprs = Some(preds);
             }
-            ast::JoinConstraint::Using(distinct_names) => {
+            // join 使用 using 还是要将其变为和 join on 相同
+            ast::JoinConstraint::Using(colNamesInUsing0) => {
                 // USING join is replaced with a list of equality predicates
-                let mut using_predicates = vec![];
-                for distinct_name in distinct_names.iter() {
-                    let name_normalized = normalize_ident(distinct_name.0.as_str());
-                    let left_tables = &tables[..table_index];
-                    assert!(!left_tables.is_empty());
-                    let right_table = &tables[table_index];
-                    let mut left_col = None;
-                    for (left_table_idx, left_table) in left_tables.iter().enumerate() {
-                        left_col = left_table
-                            .table
-                            .columns
-                            .iter()
-                            .enumerate()
-                            .find(|(_, col)| col.name == name_normalized)
-                            .map(|(idx, col)| (left_table_idx, idx, col));
-                        if left_col.is_some() {
-                            break;
+                let mut joinOnExprs0 = vec![];
+
+                for colNameInUsing in colNamesInUsing0.iter() {
+                    let colNameInUsing = normalize_ident(colNameInUsing.0.as_str());
+
+                    let leftTblRefs = &tblRefsCollected[..curTblIndex];
+                    assert!(!leftTblRefs.is_empty());
+
+                    let rightTblRef = &tblRefsCollected[curTblIndex];
+
+                    // using对应的字段名是两表都有的 到两的表是挨个比对colName
+                    let leftCol = {
+                        let mut leftCol = None;
+
+                        for (leftTblIndex, leftTblRef) in leftTblRefs.iter().enumerate() {
+                            leftCol = leftTblRef.table.columns.iter().enumerate().find(|(_, col)| col.name == colNameInUsing).map(|(colIndex, col)| (leftTblIndex, colIndex, col));
+                            if leftCol.is_some() {
+                                break;
+                            }
                         }
-                    }
-                    if left_col.is_none() {
-                        crate::bail_parse_error!(
-                            "cannot join using column {} - column not present in all tables",
-                            distinct_name.0
-                        );
-                    }
-                    let right_col = right_table
-                        .table
-                        .columns
-                        .iter()
-                        .enumerate()
-                        .find(|(_, col)| col.name == name_normalized);
-                    if right_col.is_none() {
-                        crate::bail_parse_error!(
-                            "cannot join using column {} - column not present in all tables",
-                            distinct_name.0
-                        );
-                    }
-                    let (left_table_idx, left_col_idx, left_col) = left_col.unwrap();
-                    let (right_col_idx, right_col) = right_col.unwrap();
-                    using_predicates.push(ast::Expr::Binary(
+
+                        if leftCol.is_none() {
+                            crate::bail_parse_error!("cannot join using column {} - column not present in all tables",colNameInUsing);
+                        }
+
+                        leftCol.unwrap()
+                    };
+
+                    let rightCol = {
+                        let rightCol = rightTblRef.table.columns.iter().enumerate().find(|(_, col)| col.name == colNameInUsing);
+                        if rightCol.is_none() {
+                            crate::bail_parse_error!("cannot join using column {} - column not present in all tables", colNameInUsing);
+                        }
+
+                        rightCol.unwrap()
+                    };
+
+                    let (leftTblIndex, leftColIndex, leftCol) = leftCol;
+                    let (rightColIndex, rightCol) = rightCol;
+
+                    // 还是要要变为传统的on形式
+                    joinOnExprs0.push(ast::Expr::Binary(
                         Box::new(ast::Expr::Column {
                             database: None,
-                            table: left_table_idx,
-                            column: left_col_idx,
-                            is_rowid_alias: left_col.is_rowid_alias,
+                            table: leftTblIndex,
+                            column: leftColIndex,
+                            is_rowid_alias: leftCol.is_rowid_alias,
                         }),
                         ast::Operator::Equals,
                         Box::new(ast::Expr::Column {
                             database: None,
-                            table: right_table.table_index,
-                            column: right_col_idx,
-                            is_rowid_alias: right_col.is_rowid_alias,
+                            table: rightTblRef.table_index,
+                            column: rightColIndex,
+                            is_rowid_alias: rightCol.is_rowid_alias,
                         }),
                     ));
                 }
-                predicates = Some(using_predicates);
-                using = Some(distinct_names);
+
+                joinOnExprs = Some(joinOnExprs0);
+
+                colNamesInUsing = Some(colNamesInUsing0);
             }
         }
     }
 
     Ok((
         SrcOperator::Scan {
-            tblRef: table.clone(),
+            tblRef: tblRef.clone(),
             whereExprs: None,
-            id: operator_id_counter.get_next_id(),
-            iter_dir: None,
+            id: operatorIdCounter.get_next_id(),
+            iterDirection: None,
         },
-        outer,
-        using,
-        predicates,
+        isOuter,
+        colNamesInUsing,
+        joinOnExprs,
     ))
 }
 
-fn break_predicate_at_and_boundaries(predicate: ast::Expr, out_predicates: &mut Vec<ast::Expr>) {
+fn break_predicate_at_and_boundaries(predicate: ast::Expr, out: &mut Vec<ast::Expr>) {
     match predicate {
         ast::Expr::Binary(left, ast::Operator::And, right) => {
-            break_predicate_at_and_boundaries(*left, out_predicates);
-            break_predicate_at_and_boundaries(*right, out_predicates);
+            break_predicate_at_and_boundaries(*left, out);
+            break_predicate_at_and_boundaries(*right, out);
         }
-        _ => {
-            out_predicates.push(predicate);
-        }
+        _ => out.push(predicate),
     }
 }

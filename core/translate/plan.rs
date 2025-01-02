@@ -30,10 +30,10 @@ pub struct GroupBy {
 #[derive(Debug)]
 pub struct Plan {
     /// A tree of sources (tables).
-    pub source: SrcOperator,
+    pub srcOperator: SrcOperator,
 
     /// the columns inside SELECT ... FROM
-    pub result_columns: Vec<ResultSetColumn>,
+    pub resultCols: Vec<ResultSetColumn>,
 
     /// where clause split into a vec at 'AND' boundaries.
     pub whereExprs: Option<Vec<ast::Expr>>,
@@ -42,7 +42,7 @@ pub struct Plan {
     pub group_by: Option<GroupBy>,
 
     /// order by clause
-    pub orderByExprs: Option<Vec<(ast::Expr, Direction)>>,
+    pub orderBys: Option<Vec<(ast::Expr, Direction)>>,
 
     /// all the aggregates collected from the result columns, order by, and (TODO) having clauses
     pub aggregates: Vec<Aggregate>,
@@ -51,18 +51,18 @@ pub struct Plan {
     pub limit: Option<usize>,
 
     /// all the tables referenced in the query
-    pub refTbls: Vec<BTreeTableRef>,
+    pub tblRefs: Vec<BTreeTableRef>,
 
     /// all the indexes available in schema
     pub indexes: Vec<Rc<Index>>,
 
     /// query contains a constant condition that is always false
-    pub contains_constant_false_condition: bool,
+    pub containsConstantFalseCondition: bool,
 }
 
 impl Display for Plan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.source)
+        write!(f, "{}", self.srcOperator)
     }
 }
 
@@ -110,7 +110,7 @@ impl SrcOperator {
                 }
                 columns
             }
-            SrcOperator::Scan { tblRef: table_reference, .. } | SrcOperator::Search { table_reference, .. } =>
+            SrcOperator::Scan { tblRef: table_reference, .. } | SrcOperator::Search { tblRef: table_reference, .. } =>
                 table_reference.table.columns.iter().enumerate().map(|(i, col)| (table_reference, col, i)).collect(),
             SrcOperator::Nothing => Vec::new(),
         }
@@ -145,15 +145,15 @@ pub enum SrcOperator {
         id: usize,
         tblRef: BTreeTableRef,
         whereExprs: Option<Vec<ast::Expr>>,
-        iter_dir: Option<IterationDirection>,
+        iterDirection: Option<IterationDirection>,
     },
     // Search operator
     // This operator is used to search for a row in a table using an index
     // (i.e. a primary key or a secondary index)
     Search {
         id: usize,
-        table_reference: BTreeTableRef,
-        search: IndexSearch,
+        tblRef: BTreeTableRef,
+        indexSearch: IndexSearch,
         predicates: Option<Vec<ast::Expr>>,
     },
     // Nothing operator
@@ -165,6 +165,7 @@ pub enum SrcOperator {
 #[derive(Clone, Debug)]
 pub struct BTreeTableRef {
     pub table: Rc<BTreeTable>,
+    /// 要是用了alias的话便是alias 不然是原名
     pub table_identifier: String,
     pub table_index: usize,
 }
@@ -173,10 +174,10 @@ pub struct BTreeTableRef {
 /// (i.e. a primary key or a secondary index)
 #[derive(Clone, Debug)]
 pub enum IndexSearch {
-    /// A rowid equality point lookup. This is a special case that uses the SeekRowid bytecode instruction and does not loop.
+    /// 它是RowIdSearch的特例 op是equal
     RowidEq { cmp_expr: ast::Expr },
 
-    /// A rowid search. Uses bytecode instructions like SeekGT, SeekGE etc.
+    /// 是IndexSearch特例
     RowidSearch {
         cmp_op: ast::Operator,
         cmp_expr: ast::Expr,
@@ -309,8 +310,8 @@ impl Display for SrcOperator {
                     Ok(())
                 }
                 SrcOperator::Search {
-                    table_reference,
-                    search,
+                    tblRef: table_reference,
+                    indexSearch: search,
                     ..
                 } => {
                     match search {
@@ -355,7 +356,7 @@ pub fn get_table_ref_bitmask_for_operator<'a>(
                 .unwrap();
         }
         SrcOperator::Search {
-            table_reference, ..
+            tblRef: table_reference, ..
         } => {
             table_refs_mask |= 1 << tables.iter().position(|t| &t.table_identifier == &table_reference.table_identifier).unwrap();
         }

@@ -25,22 +25,19 @@ impl Schema {
         Self { tables, indexes }
     }
 
-    pub fn add_table(&mut self, table: Rc<BTreeTable>) {
+    pub fn addTbl(&mut self, table: Rc<BTreeTable>) {
         let name = normalize_ident(&table.name);
         self.tables.insert(name, table);
     }
 
-    pub fn get_table(&self, name: &str) -> Option<Rc<BTreeTable>> {
+    pub fn getTbl(&self, name: &str) -> Option<Rc<BTreeTable>> {
         let name = normalize_ident(name);
         self.tables.get(&name).cloned()
     }
 
     pub fn add_index(&mut self, index: Rc<Index>) {
         let table_name = normalize_ident(&index.table_name);
-        self.indexes
-            .entry(table_name)
-            .or_default()
-            .push(index.clone())
+        self.indexes.entry(table_name).or_default().push(index.clone())
     }
 }
 
@@ -121,7 +118,7 @@ impl Table {
         }
     }
 
-    pub fn has_rowid(&self) -> bool {
+    pub fn hasRowId(&self) -> bool {
         match self {
             Table::BTree(table) => table.has_rowid,
             Table::Index(_) => unimplemented!(),
@@ -142,7 +139,7 @@ impl PartialEq for Table {
 
 #[derive(Debug)]
 pub struct BTreeTable {
-    pub root_page: usize,
+    pub rootPage: usize,
     pub name: String,
     pub primary_key_column_names: Vec<String>,
     pub columns: Vec<Column>,
@@ -241,7 +238,7 @@ fn create_table(tbl_name: QualifiedName,
                 body: CreateTableBody,
                 root_page: usize, ) -> Result<BTreeTable> {
     let table_name = normalize_ident(&tbl_name.name.0);
-    trace!("Creating table {}", table_name);
+    trace!("creating table {}", table_name);
     let mut has_rowid = true;
     let mut primary_key_column_names = vec![];
     let mut cols = vec![];
@@ -333,7 +330,7 @@ fn create_table(tbl_name: QualifiedName,
         }
     }
     Ok(BTreeTable {
-        root_page,
+        rootPage: root_page,
         name: table_name,
         has_rowid,
         primary_key_column_names,
@@ -393,7 +390,7 @@ impl fmt::Display for ColumnType {
 
 pub fn buildSqliteSchemaTable() -> BTreeTable {
     BTreeTable {
-        root_page: 1,
+        rootPage: 1,
         name: "sqlite_schema".to_string(),
         has_rowid: true,
         primary_key_column_names: vec![],
@@ -437,7 +434,7 @@ pub fn buildSqliteSchemaTable() -> BTreeTable {
 pub struct Index {
     pub name: String,
     pub table_name: String,
-    pub root_page: usize,
+    pub rootPage: usize,
     pub columns: Vec<IndexColumn>,
     pub unique: bool,
 }
@@ -480,7 +477,7 @@ impl Index {
                 Ok(Index {
                     name: index_name,
                     table_name: normalize_ident(&tbl_name.0),
-                    root_page,
+                    rootPage: root_page,
                     columns: index_columns,
                     unique,
                 })

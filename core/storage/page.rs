@@ -1,5 +1,5 @@
 use crate::storage::buffer_pool::BufferPool;
-use crate::storage::database::Storage;
+use crate::storage::Storage;
 use crate::storage::sqlite3_ondisk::{self, DbHeader, PageContent};
 use crate::storage::wal::Wal;
 use crate::{Buffer, Result};
@@ -20,7 +20,7 @@ pub struct Page {
 pub struct PageInner {
     pub flags: AtomicUsize,
     pub pageContent: Option<PageContent>,
-    pub id: usize,
+    pub pageId: usize,
 }
 
 // Concurrency control of pages will be handled by the pager, we won't wrap Page with RwLock because that is bad bad.
@@ -38,15 +38,14 @@ const PAGE_DIRTY: usize = 0b1000;
 const PAGE_LOADED: usize = 0b10000;
 
 impl Page {
-    pub fn new(id: usize) -> Page {
+    pub fn new(pageId: usize) -> Page {
         Page {
             pageInner: UnsafeCell::new(
                 PageInner {
                     flags: AtomicUsize::new(0),
                     pageContent: None,
-                    id,
-                }
-            ),
+                    pageId,
+                }),
         }
     }
 
@@ -70,7 +69,7 @@ impl Page {
         self.getMutInner().flags.load(Ordering::SeqCst) & PAGE_LOCKED != 0
     }
 
-    pub fn set_locked(&self) {
+    pub fn setLocked(&self) {
         self.getMutInner().flags.fetch_or(PAGE_LOCKED, Ordering::SeqCst);
     }
 
@@ -111,7 +110,7 @@ impl Page {
     }
 
     pub fn clear_loaded(&self) {
-        log::debug!("clear loaded {}", self.getMutInner().id);
+        log::debug!("clear loaded {}", self.getMutInner().pageId);
         self.getMutInner().flags.fetch_and(!PAGE_LOADED, Ordering::SeqCst);
     }
 }
@@ -190,68 +189,71 @@ impl Pager {
     }
 
     pub fn begin_read_tx(&self) -> Result<()> {
-        self.wal.borrow_mut().begin_read_tx()?;
+        self.wal.borrow_mut().beginReadTx()?;
         Ok(())
     }
 
     pub fn begin_write_tx(&self) -> Result<()> {
-        self.wal.borrow_mut().begin_write_tx()?;
+        self.wal.borrow_mut().beginWriteTx()?;
         Ok(())
     }
 
     pub fn end_tx(&self) -> Result<CheckpointStatus> {
-        match self.cacheflush()? {
+        match self.flushCache()? {
             CheckpointStatus::Done => {}
             CheckpointStatus::IO => return Ok(CheckpointStatus::IO),
         };
-        self.wal.borrow().end_read_tx()?;
+        self.wal.borrow().endReadTx()?;
         Ok(CheckpointStatus::Done)
     }
 
-    pub fn read_page(&self, page_idx: usize) -> crate::Result<PageArc> {
-        let mut page_cache = self.pageCache.write().unwrap();
+    pub fn readPage(&self, pageId: usize) -> crate::Result<PageArc> {
+        let mut pageCache = self.pageCache.write().unwrap();
 
-        let pageCacheKey = PageCacheKey::new(page_idx, Some(self.wal.borrow().get_max_frame()));
-        if let Some(page) = page_cache.get(&pageCacheKey) {
-            trace!("read_page(page_idx = {}) = cached", page_idx);
+        let pageCacheKey = PageCacheKey::new(pageId, Some(self.wal.borrow().getMaxFrameId()));
+
+        if let Some(page) = pageCache.get(&pageCacheKey) {
             return Ok(page.clone());
         }
 
-        let page = Arc::new(Page::new(page_idx));
-        page.set_locked();
+        let page = Arc::new(Page::new(pageId));
 
-        if let Some(frame_id) = self.wal.borrow().find_frame(page_idx as u64)? {
-            self.wal.borrow().read_frame(frame_id, page.clone(), self.bufferPool.clone())?;
+        page.setLocked();
+
+        // 到wal读取
+        if let Some(frameId) = self.wal.borrow().getLatestFrameIdContainsPageId(pageId as u64)? {
+            self.wal.borrow().readFrame(frameId, page.clone(), self.bufferPool.clone())?;
 
             page.set_uptodate();
 
             // TODO(pere) ensure page is inserted, we should probably first insert to page cache and if successful, read frame or page
-            page_cache.insert(pageCacheKey, page.clone());
+            pageCache.insert(pageCacheKey, page.clone());
+
             return Ok(page);
         }
 
-        sqlite3_ondisk::begin_read_page(self.storage.clone(),
-                                        self.bufferPool.clone(),
-                                        page.clone(),
-                                        page_idx)?;
+        sqlite3_ondisk::beginReadPage(self.storage.clone(),
+                                      self.bufferPool.clone(),
+                                      page.clone(),
+                                      pageId)?;
 
         // TODO(pere) ensure page is inserted
-        page_cache.insert(pageCacheKey, page.clone());
+        pageCache.insert(pageCacheKey, page.clone());
 
         Ok(page)
     }
 
     /// Loads pages if not loaded
     pub fn load_page(&self, page: PageArc) -> Result<()> {
-        let id = page.getMutInner().id;
+        let id = page.getMutInner().pageId;
         trace!("load_page(page_idx = {})", id);
         let mut page_cache = self.pageCache.write().unwrap();
-        page.set_locked();
-        let page_key = PageCacheKey::new(id, Some(self.wal.borrow().get_max_frame()));
-        if let Some(frame_id) = self.wal.borrow().find_frame(id as u64)? {
+        page.setLocked();
+        let page_key = PageCacheKey::new(id, Some(self.wal.borrow().getMaxFrameId()));
+        if let Some(frame_id) = self.wal.borrow().getLatestFrameIdContainsPageId(id as u64)? {
             self.wal
                 .borrow()
-                .read_frame(frame_id, page.clone(), self.bufferPool.clone())?;
+                .readFrame(frame_id, page.clone(), self.bufferPool.clone())?;
             {
                 page.set_uptodate();
             }
@@ -261,7 +263,7 @@ impl Pager {
             }
             return Ok(());
         }
-        sqlite3_ondisk::begin_read_page(
+        sqlite3_ondisk::beginReadPage(
             self.storage.clone(),
             self.bufferPool.clone(),
             page.clone(),
@@ -291,7 +293,7 @@ impl Pager {
         dirty_pages.insert(page_id);
     }
 
-    pub fn cacheflush(&self) -> Result<CheckpointStatus> {
+    pub fn flushCache(&self) -> Result<CheckpointStatus> {
         loop {
             let state = self.flush_info.borrow().state.clone();
             match state {
@@ -299,12 +301,11 @@ impl Pager {
                     let db_size = self.db_header.borrow().database_size;
                     for page_id in self.dirty_pages.borrow().iter() {
                         let mut cache = self.pageCache.write().unwrap();
-                        let page_key =
-                            PageCacheKey::new(*page_id, Some(self.wal.borrow().get_max_frame()));
+                        let page_key = PageCacheKey::new(*page_id, Some(self.wal.borrow().getMaxFrameId()));
                         let page = cache.get(&page_key).expect("we somehow added a page to dirty list but we didn't mark it as dirty, causing cache to drop it.");
                         let page_type = page.getMutInner().pageContent.as_ref().unwrap().maybe_page_type();
-                        log::trace!("cacheflush(page={}, page_type={:?}", page_id, page_type);
-                        self.wal.borrow_mut().append_frame(
+                        trace!("cacheflush(page={}, page_type={:?}", page_id, page_type);
+                        self.wal.borrow_mut().appendFrame(
                             page.clone(),
                             db_size,
                             self.flush_info.borrow().in_flight_writes.clone(),
@@ -315,8 +316,7 @@ impl Pager {
                     return Ok(CheckpointStatus::IO);
                 }
                 FlushState::WaitAppendFrames => {
-                    let in_flight = *self.flush_info.borrow().in_flight_writes.borrow();
-                    if in_flight == 0 {
+                    if *self.flush_info.borrow().in_flight_writes.borrow() == 0 {
                         self.flush_info.borrow_mut().state = FlushState::SyncWal;
                     } else {
                         return Ok(CheckpointStatus::IO);
@@ -329,7 +329,7 @@ impl Pager {
                         Err(e) => return Err(e),
                     }
 
-                    let should_checkpoint = self.wal.borrow().should_checkpoint();
+                    let should_checkpoint = self.wal.borrow().shouldCheckPoint();
                     if should_checkpoint {
                         self.flush_info.borrow_mut().state = FlushState::Checkpoint;
                     } else {
@@ -352,20 +352,21 @@ impl Pager {
                 FlushState::WaitSyncDbFile => {
                     if *self.syncing.borrow() {
                         return Ok(CheckpointStatus::IO);
-                    } else {
-                        self.flush_info.borrow_mut().state = FlushState::Start;
-                        break;
                     }
+
+                    self.flush_info.borrow_mut().state = FlushState::Start;
+                    break;
                 }
             }
         }
+
         Ok(CheckpointStatus::Done)
     }
 
     pub fn checkpoint(&self) -> Result<CheckpointStatus> {
         loop {
             let state = self.checkpoint_state.borrow().clone();
-            log::trace!("pager_checkpoint(state={:?})", state);
+            trace!("pager_checkpoint(state={:?})", state);
             match state {
                 CheckpointState::Checkpoint => {
                     let in_flight = self.checkpoint_inflight.clone();
@@ -436,7 +437,7 @@ impl Pager {
             // update database size
             // read sync for now
             loop {
-                let first_page_ref = self.read_page(1)?;
+                let first_page_ref = self.readPage(1)?;
                 if first_page_ref.is_locked() {
                     self.io.runOnce()?;
                     continue;
@@ -454,10 +455,10 @@ impl Pager {
         {
             // setup page and add to cache
             page.set_dirty();
-            self.add_dirty(page.getMutInner().id);
+            self.add_dirty(page.getMutInner().pageId);
             let mut cache = self.pageCache.write().unwrap();
             let page_key =
-                PageCacheKey::new(page.getMutInner().id, Some(self.wal.borrow().get_max_frame()));
+                PageCacheKey::new(page.getMutInner().pageId, Some(self.wal.borrow().getMaxFrameId()));
             cache.insert(page_key, page.clone());
         }
         Ok(page)
@@ -466,14 +467,14 @@ impl Pager {
     pub fn put_loaded_page(&self, id: usize, page: PageArc) {
         let mut cache = self.pageCache.write().unwrap();
         // cache insert invalidates previous page
-        let page_key = PageCacheKey::new(id, Some(self.wal.borrow().get_max_frame()));
+        let page_key = PageCacheKey::new(id, Some(self.wal.borrow().getMaxFrameId()));
         cache.insert(page_key, page.clone());
         page.set_loaded();
     }
 
     pub fn usable_size(&self) -> usize {
         let db_header = self.db_header.borrow();
-        (db_header.pageSize - db_header.unused_space as u16) as usize
+        (db_header.pageSize - db_header.pageUnusedSpace as u16) as usize
     }
 }
 

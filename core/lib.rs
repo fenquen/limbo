@@ -27,7 +27,7 @@ use std::sync::Weak;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::{cell::RefCell, rc::Rc};
 #[cfg(feature = "fs")]
-use storage::database::FileStorage;
+use storage::FileStorage;
 use storage::page_cache::DumbLruPageCache;
 use storage::sqlite3_ondisk::{DbHeader, DATABASE_HEADER_SIZE};
 pub use storage::wal::WalFile;
@@ -45,7 +45,7 @@ pub use io::OpenFlags;
 pub use io::PlatformIO;
 pub use io::{Buffer, CompletionEnum, File, MemoryIO, WriteCompletion, IO};
 pub use storage::buffer_pool::BufferPool;
-pub use storage::database::Storage;
+pub use storage::Storage;
 pub use storage::page::Page;
 pub use storage::page::Pager;
 pub use storage::wal::CheckpointStatus;
@@ -116,7 +116,7 @@ impl Database {
         let conn = Rc::new(Conn {
             pager: pager.clone(),
             schema: Rc::new(RefCell::new(Schema::new())),
-            header: dbHeader.clone(),
+            dbHeader: dbHeader.clone(),
             db: Weak::new(),
             last_insert_rowid: Cell::new(0),
         });
@@ -139,7 +139,7 @@ impl Database {
         Rc::new(Conn {
             pager: self.pager.clone(),
             schema: self.schema.clone(),
-            header: self.dbHeader.clone(),
+            dbHeader: self.dbHeader.clone(),
             last_insert_rowid: Cell::new(0),
             db: Arc::downgrade(self),
         })
@@ -200,7 +200,7 @@ pub fn maybeInitDatabaseFile(file: &Rc<dyn File>, io: &Arc<dyn IO>) -> Result<()
 pub struct Conn {
     pager: Rc<Pager>,
     schema: Rc<RefCell<Schema>>,
-    header: Rc<RefCell<DbHeader>>,
+    dbHeader: Rc<RefCell<DbHeader>>,
     db: Weak<Database>, // backpointer to the database holding this connection
     last_insert_rowid: Cell<u64>,
 }
@@ -217,7 +217,7 @@ impl Conn {
                     let program = Rc::new(translate::translate(
                         &self.schema.borrow(),
                         stmt,
-                        self.header.clone(),
+                        self.dbHeader.clone(),
                         self.pager.clone(),
                         Rc::downgrade(self),
                     )?);
@@ -243,7 +243,7 @@ impl Conn {
                     let program = Rc::new(
                         translate::translate(&self.schema.borrow(),
                                              stmt,
-                                             self.header.clone(),
+                                             self.dbHeader.clone(),
                                              self.pager.clone(),
                                              Rc::downgrade(self))?
                     );
@@ -255,7 +255,7 @@ impl Conn {
                 Cmd::Explain(stmt) => {
                     let program = translate::translate(&self.schema.borrow(),
                                                        stmt,
-                                                       self.header.clone(),
+                                                       self.dbHeader.clone(),
                                                        self.pager.clone(),
                                                        Rc::downgrade(self))?;
 
@@ -290,7 +290,7 @@ impl Conn {
                     let program = translate::translate(
                         &self.schema.borrow(),
                         stmt,
-                        self.header.clone(),
+                        self.dbHeader.clone(),
                         self.pager.clone(),
                         Rc::downgrade(self),
                     )?;
@@ -301,7 +301,7 @@ impl Conn {
                     let program = translate::translate(
                         &self.schema.borrow(),
                         stmt,
-                        self.header.clone(),
+                        self.dbHeader.clone(),
                         self.pager.clone(),
                         Rc::downgrade(self),
                     )?;
@@ -314,7 +314,7 @@ impl Conn {
     }
 
     pub fn cacheflush(&self) -> Result<CheckpointStatus> {
-        self.pager.cacheflush()
+        self.pager.flushCache()
     }
 
     pub fn clear_page_cache(&self) -> Result<()> {

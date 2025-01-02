@@ -335,7 +335,7 @@ pub enum Expr {
         table: usize,
         /// the z in `x.y.z`. index of the column in the table.
         column: usize,
-        /// is primary key  is the column a rowid alias
+        /// 是不是 primary key  bindColRef()时候设置的
         is_rowid_alias: bool,
     },
     /// `IN`
@@ -786,7 +786,7 @@ pub enum OneSelect {
 pub struct FromClause {
     /// table
     pub select: Option<Box<SelectTable>>, // FIXME mandatory
-    /// `JOIN`ed tabled
+    /// `JOIN`ed tabled 意思是join的右半部分的
     pub joins: Option<Vec<JoinedSelectTable>>,
     op: Option<JoinOperator>, // FIXME transient
 }
@@ -1666,7 +1666,7 @@ pub enum TriggerCmd {
     Select(Select),
 }
 
-/// Conflict resolution types
+/// 当 conflict 时候应如何应对
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ResolveType {
     /// `ROLLBACK`

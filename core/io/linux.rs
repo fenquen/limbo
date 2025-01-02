@@ -209,6 +209,7 @@ impl File for LinuxFile {
                 Err(LimboError::IOError(err))
             };
         }
+
         Ok(())
     }
 
@@ -222,13 +223,10 @@ impl File for LinuxFile {
             l_pid: 0,
         };
 
-        let unlock_result = unsafe { libc::fcntl(fd, F_SETLK, &flock) };
-        if unlock_result == -1 {
-            return Err(LimboError::LockingError(format!(
-                "Failed to release file lock: {}",
-                std::io::Error::last_os_error()
-            )));
+        if unsafe { libc::fcntl(fd, F_SETLK, &flock) } == -1 {
+            return Err(LimboError::LockingError(format!("Failed to release file lock: {}", std::io::Error::last_os_error())));
         }
+
         Ok(())
     }
 
@@ -241,13 +239,13 @@ impl File for LinuxFile {
         let fd = io_uring::types::Fd(self.file.as_raw_fd());
         let mut io = self.innerLinuxIo.borrow_mut();
 
-        let read_e = {
+        let entry = {
             let mut buf = readCompletion.buf_mut();
             let iovec = io.get_iovec(buf.as_mut_ptr(), buf.len());
             io_uring::opcode::Readv::new(fd, iovec, 1).offset(pos as u64).build().user_data(io.ioUringWrapper.get_key())
         };
 
-        io.ioUringWrapper.pushToSubmitQueue(&read_e, c);
+        io.ioUringWrapper.pushToSubmitQueue(&entry, c);
 
         Ok(())
     }

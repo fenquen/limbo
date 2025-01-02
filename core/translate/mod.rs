@@ -23,9 +23,9 @@ use std::str::FromStr;
 use crate::schema::Schema;
 use crate::storage::page::Pager;
 use crate::storage::sqlite3_ondisk::{DbHeader, MIN_PAGE_CACHE_SIZE};
-use crate::vdbe::{builder::ProgramBuilder, Insn, Program};
+use crate::vdbe::{program_builder::ProgramBuilder, Insn, Program};
 use crate::{bail_parse_error, Conn, Result};
-use insert::translate_insert;
+use insert::translateInsert;
 use select::translateSel;
 use sqlite3_parser::ast::fmt::ToTokens;
 use sqlite3_parser::ast::{self, PragmaName};
@@ -57,16 +57,13 @@ pub fn translate(schema: &Schema,
             )
         }
         ast::Stmt::Insert {
-            with,
-            or_conflict,
             tbl_name,
             columns,
             body,
             returning,
-        } => translate_insert(
+            ..
+        } => translateInsert(
             schema,
-            &with,
-            &or_conflict,
             &tbl_name,
             &columns,
             &body,
@@ -139,34 +136,32 @@ addr  opcode         p1    p2    p3    p4             p5  comment
 31    Goto           0     1     0                    0
 
 */
-fn translate_create_table(
-    tbl_name: ast::QualifiedName,
-    body: ast::CreateTableBody,
-    if_not_exists: bool,
-    database_header: Rc<RefCell<DbHeader>>,
-    connection: Weak<Conn>,
-    schema: &Schema,
-) -> Result<Program> {
+fn translate_create_table(tbl_name: ast::QualifiedName,
+                          body: ast::CreateTableBody,
+                          if_not_exists: bool,
+                          database_header: Rc<RefCell<DbHeader>>,
+                          connection: Weak<Conn>,
+                          schema: &Schema) -> Result<Program> {
     let mut program = ProgramBuilder::new();
-    if schema.get_table(tbl_name.name.0.as_str()).is_some() {
+    if schema.getTbl(tbl_name.name.0.as_str()).is_some() {
         if if_not_exists {
-            let init_label = program.allocate_label();
-            program.emit_insn_with_label_dependency(
+            let init_label = program.allocateLabel();
+            program.addInsnWithLabelDependency(
                 Insn::Init {
                     target_pc: init_label,
                 },
                 init_label,
             );
-            let start_offset = program.offset();
-            program.emit_insn(Insn::Halt {
+            let start_offset = program.nextPc();
+            program.addInsn0(Insn::Halt {
                 err_code: 0,
                 description: String::new(),
             });
-            program.resolve_label(init_label, program.offset());
-            program.emit_insn(Insn::Transaction { write: true });
+            program.resolveLabel(init_label, program.nextPc());
+            program.addInsn0(Insn::Transaction { write: true });
             program.emit_constant_insns();
-            program.emit_insn(Insn::Goto {
-                target_pc: start_offset,
+            program.addInsn0(Insn::Goto {
+                targetPc: start_offset,
             });
             return Ok(program.build(database_header, connection));
         }
@@ -175,109 +170,109 @@ fn translate_create_table(
 
     let sql = create_table_body_to_str(&tbl_name, &body);
 
-    let parse_schema_label = program.allocate_label();
-    let init_label = program.allocate_label();
-    program.emit_insn_with_label_dependency(
+    let parse_schema_label = program.allocateLabel();
+    let init_label = program.allocateLabel();
+    program.addInsnWithLabelDependency(
         Insn::Init {
             target_pc: init_label,
         },
         init_label,
     );
-    let start_offset = program.offset();
+    let start_offset = program.nextPc();
     // TODO: ReadCookie
     // TODO: If
     // TODO: SetCookie
     // TODO: SetCookie
-    let root_reg = program.alloc_register();
-    program.emit_insn(Insn::CreateBtree {
+    let root_reg = program.allocRegister();
+    program.addInsn0(Insn::CreateBtree {
         db: 0,
         root: root_reg,
         flags: 1,
     });
     let table_id = "sqlite_schema".to_string();
-    let table = schema.get_table(&table_id).unwrap();
+    let table = schema.getTbl(&table_id).unwrap();
     let table = crate::schema::Table::BTree(table.clone());
     let sqlite_schema_cursor_id =
-        program.alloc_cursor_id(Some(table_id.to_owned()), Some(table.to_owned()));
-    program.emit_insn(Insn::OpenWriteAsync {
-        cursor_id: sqlite_schema_cursor_id,
-        root_page: 1,
+        program.allocCursorId(Some(table_id.to_owned()), Some(table.to_owned()));
+    program.addInsn0(Insn::OpenWriteAsync {
+        cursorId: sqlite_schema_cursor_id,
+        rootPage: 1,
     });
-    program.emit_insn(Insn::OpenWriteAwait {});
-    let rowid_reg = program.alloc_register();
-    program.emit_insn(Insn::NewRowid {
-        cursor: sqlite_schema_cursor_id,
+    program.addInsn0(Insn::OpenWriteAwait {});
+    let rowid_reg = program.allocRegister();
+    program.addInsn0(Insn::NewRowid {
+        cursorId: sqlite_schema_cursor_id,
         rowid_reg,
         prev_largest_reg: 0,
     });
-    let null_reg_1 = program.alloc_register();
-    let null_reg_2 = program.alloc_register();
-    program.emit_insn(Insn::Null {
+    let null_reg_1 = program.allocRegister();
+    let null_reg_2 = program.allocRegister();
+    program.addInsn0(Insn::Null {
         dest: null_reg_1,
         dest_end: Some(null_reg_2),
     });
-    let type_reg = program.alloc_register();
-    program.emit_insn(Insn::String8 {
+    let type_reg = program.allocRegister();
+    program.addInsn0(Insn::String8 {
         value: "table".to_string(),
         dest: type_reg,
     });
-    let name_reg = program.alloc_register();
-    program.emit_insn(Insn::String8 {
+    let name_reg = program.allocRegister();
+    program.addInsn0(Insn::String8 {
         value: tbl_name.name.0.to_string(),
         dest: name_reg,
     });
-    let tbl_name_reg = program.alloc_register();
-    program.emit_insn(Insn::String8 {
+    let tbl_name_reg = program.allocRegister();
+    program.addInsn0(Insn::String8 {
         value: tbl_name.name.0.to_string(),
         dest: tbl_name_reg,
     });
-    let rootpage_reg = program.alloc_register();
-    program.emit_insn(Insn::Copy {
+    let rootpage_reg = program.allocRegister();
+    program.addInsn0(Insn::Copy {
         src_reg: root_reg,
         dst_reg: rootpage_reg,
         amount: 1,
     });
-    let sql_reg = program.alloc_register();
-    program.emit_insn(Insn::String8 {
+    let sql_reg = program.allocRegister();
+    program.addInsn0(Insn::String8 {
         value: sql.to_string(),
         dest: sql_reg,
     });
-    let record_reg = program.alloc_register();
-    program.emit_insn(Insn::MakeRecord {
-        start_reg: type_reg,
+    let record_reg = program.allocRegister();
+    program.addInsn0(Insn::MakeRecord {
+        startReg: type_reg,
         count: 5,
-        dest_reg: record_reg,
+        destReg: record_reg,
     });
     // TODO: Delete
-    program.emit_insn(Insn::InsertAsync {
-        cursor: sqlite_schema_cursor_id,
-        key_reg: rowid_reg,
-        record_reg,
+    program.addInsn0(Insn::InsertAsync {
+        cursorId: sqlite_schema_cursor_id,
+        keyReg: rowid_reg,
+        recReg: record_reg,
         flag: 0,
     });
-    program.emit_insn(Insn::InsertAwait {
+    program.addInsn0(Insn::InsertAwait {
         cursor_id: sqlite_schema_cursor_id,
     });
-    program.resolve_label(parse_schema_label, program.offset());
+    program.resolveLabel(parse_schema_label, program.nextPc());
     // TODO: SetCookie
     //
     // TODO: remove format, it sucks for performance but is convinient
     let parse_schema_where_clause = format!("tbl_name = '{}' AND type != 'trigger'", tbl_name);
-    program.emit_insn(Insn::ParseSchema {
+    program.addInsn0(Insn::ParseSchema {
         db: sqlite_schema_cursor_id,
         where_clause: parse_schema_where_clause,
     });
 
     // TODO: SqlExec
-    program.emit_insn(Insn::Halt {
+    program.addInsn0(Insn::Halt {
         err_code: 0,
         description: String::new(),
     });
-    program.resolve_label(init_label, program.offset());
-    program.emit_insn(Insn::Transaction { write: true });
+    program.resolveLabel(init_label, program.nextPc());
+    program.addInsn0(Insn::Transaction { write: true });
     program.emit_constant_insns();
-    program.emit_insn(Insn::Goto {
-        target_pc: start_offset,
+    program.addInsn0(Insn::Goto {
+        targetPc: start_offset,
     });
     Ok(program.build(database_header, connection))
 }
@@ -290,14 +285,14 @@ fn translate_pragma(
     connection: Weak<Conn>,
 ) -> Result<Program> {
     let mut program = ProgramBuilder::new();
-    let init_label = program.allocate_label();
-    program.emit_insn_with_label_dependency(
+    let init_label = program.allocateLabel();
+    program.addInsnWithLabelDependency(
         Insn::Init {
             target_pc: init_label,
         },
         init_label,
     );
-    let start_offset = program.offset();
+    let start_offset = program.nextPc();
     let mut write = false;
     match body {
         None => {
@@ -318,15 +313,15 @@ fn translate_pragma(
             todo!()
         }
     };
-    program.emit_insn(Insn::Halt {
+    program.addInsn0(Insn::Halt {
         err_code: 0,
         description: String::new(),
     });
-    program.resolve_label(init_label, program.offset());
-    program.emit_insn(Insn::Transaction { write });
+    program.resolveLabel(init_label, program.nextPc());
+    program.addInsn0(Insn::Transaction { write });
     program.emit_constant_insns();
-    program.emit_insn(Insn::Goto {
-        target_pc: start_offset,
+    program.addInsn0(Insn::Goto {
+        targetPc: start_offset,
     });
     program.resolve_deferred_labels();
     Ok(program.build(database_header, connection))
@@ -377,16 +372,16 @@ fn query_pragma(
         Ok(pragma) => pragma,
         Err(()) => bail_parse_error!("Not a valid pragma name"),
     };
-    let register = program.alloc_register();
+    let register = program.allocRegister();
     match pragma {
         PragmaName::CacheSize => {
-            program.emit_insn(Insn::Integer {
+            program.addInsn0(Insn::Integer {
                 value: database_header.borrow().default_cache_size.into(),
-                dest: register,
+                destReg: register,
             });
         }
         PragmaName::JournalMode => {
-            program.emit_insn(Insn::String8 {
+            program.addInsn0(Insn::String8 {
                 value: "wal".into(),
                 dest: register,
             });
@@ -396,7 +391,7 @@ fn query_pragma(
         }
     }
 
-    program.emit_insn(Insn::ResultRow {
+    program.addInsn0(Insn::ResultRow {
         start_reg: register,
         count: 1,
     });

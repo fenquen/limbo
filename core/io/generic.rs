@@ -15,7 +15,7 @@ impl GenericIO {
 impl IO for GenericIO {
     fn openFile(&self, path: &str, flags: OpenFlags, _direct: bool) -> Result<Rc<dyn File>> {
         trace!("open_file(path = {})", path);
-        let file = std::fs::File::open(path)?;
+        let file = std::fs::File::options().read(true).write(true).create(matches!(flags, OpenFlags::Create)).open(path)?;
         Ok(Rc::new(GenericFile {
             file: RefCell::new(file),
         }))

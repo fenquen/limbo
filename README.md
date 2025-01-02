@@ -29,15 +29,11 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 Then use the SQL shell to create and query a database:
 
 ```console
-$ limbo database.db
-Limbo v0.0.6
-Enter ".help" for usage hints.
-limbo> CREATE TABLE users (id INT PRIMARY KEY, username TEXT);
-limbo> INSERT INTO users VALUES (1, 'alice');
-limbo> INSERT INTO users VALUES (2, 'bob');
-limbo> SELECT * FROM users;
+select * from sqlite_schema;
+CREATE TABLE users (id INT PRIMARY KEY, username TEXT);
+INSERT INTO users VALUES (1, 'alice');
+SELECT * FROM users where id =1;
 1|alice
-2|bob
 ```
 
 ### JavaScript (wip)

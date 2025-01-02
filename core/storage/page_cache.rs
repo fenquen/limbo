@@ -125,7 +125,7 @@ impl DumbLruPageCache {
             // evict buffer
             let page = &entry.page;
             page.clear_loaded();
-            debug!("cleaning up page {}", page.getMutInner().id);
+            debug!("cleaning up page {}", page.getMutInner().pageId);
             let _ = page.getMutInner().pageContent.take();
         }
 

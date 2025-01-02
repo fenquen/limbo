@@ -12,12 +12,13 @@ use crate::storage::sqlite3_ondisk::DbHeader;
 use crate::translate::plan::{IterationDirection, IndexSearch};
 use crate::types::{OwnedRecord, OwnedValue};
 use crate::util::exprs_are_equivalent;
-use crate::vdbe::builder::ProgramBuilder;
+use crate::vdbe::program_builder::ProgramBuilder;
 use crate::vdbe::{BranchOffset, Insn, Program};
 use crate::{Conn, Result};
-
+use crate::translate::expr;
 use super::expr::{
-    translate_aggregation, translate_aggregation_groupby, translate_condition_expr, translate_expr,
+    translate_aggregation, translate_aggregation_groupby,
+    translate_condition_expr,
     ConditionMetadata,
 };
 use super::plan::{Aggregate, BTreeTableRef, Direction, GroupBy, Plan};
@@ -28,8 +29,10 @@ use super::plan::{ResultSetColumn, SrcOperator};
 pub struct LeftJoinMetadata {
     // integer register that holds a flag that is set to true if the current row has a match for the left join
     pub match_flag_register: usize,
+
     // label for the instruction that sets the match flag to true
     pub set_match_flag_true_label: BranchOffset,
+
     // label for the instruction that checks if the match flag is true
     pub check_match_flag_label: BranchOffset,
 }
@@ -39,6 +42,7 @@ pub struct LeftJoinMetadata {
 pub struct SortMetadata {
     // cursor id for the Sorter table where the sorted rows are stored
     pub sort_cursor: usize,
+
     // register where the sorter data is inserted and later retrieved from
     pub sorter_data_register: usize,
 }
@@ -48,24 +52,34 @@ pub struct SortMetadata {
 pub struct GroupByMetadata {
     // Cursor ID for the Sorter table where the grouped rows are stored
     pub sort_cursor: usize,
+
     // Label for the subroutine that clears the accumulator registers (temporary storage for per-group aggregate calculations)
     pub subroutine_accumulator_clear_label: BranchOffset,
+
     // Register holding the return offset for the accumulator clear subroutine
     pub subroutine_accumulator_clear_return_offset_register: usize,
+
     // Label for the subroutine that outputs the accumulator contents
     pub subroutine_accumulator_output_label: BranchOffset,
+
     // Register holding the return offset for the accumulator output subroutine
     pub subroutine_accumulator_output_return_offset_register: usize,
+
     // Label for the instruction that sets the accumulator indicator to true (indicating data exists in the accumulator for the current group)
     pub accumulator_indicator_set_true_label: BranchOffset,
+
     // Register holding the key used for sorting in the Sorter
     pub sorter_key_register: usize,
+
     // Register holding a flag to abort the grouping process if necessary
     pub abort_flag_register: usize,
+
     // Register holding a boolean indicating whether there's data in the accumulator (used for aggregation)
     pub data_in_accumulator_indicator_register: usize,
+
     // Register holding the start of the accumulator group registers (i.e. the groups, not the aggregates)
     pub group_exprs_accumulator_register: usize,
+
     // Starting index of the register(s) that hold the comparison result between the current row and the previous row
     // The comparison result is used to determine if the current row belongs to the same group as the previous row
     // Each group by expression has a corresponding register
@@ -73,29 +87,36 @@ pub struct GroupByMetadata {
 }
 
 /// The Metadata struct holds various information and labels used during bytecode generation.
-/// It is used for maintaining state and control flow during the bytecode
-/// generation process.
+/// It is used for maintaining state and control flow during the bytecode generation process.
 #[derive(Debug)]
 pub struct Metadata {
     // labels for the instructions that terminate the execution when a conditional check evaluates to false. typically jumps to Halt, but can also jump to AggFinal if a parent in the tree is an aggregation
-    termination_label_stack: Vec<BranchOffset>,
+    terminationLabelStack: Vec<BranchOffset>,
+
     // labels for the instructions that jump to the next row in the current operator.
     // for example, in a join with two nested scans, the inner loop will jump to its Next instruction when the join condition is false;
     // in a join with a scan and a seek, the seek will jump to the scan's Next instruction when the join condition is false.
-    next_row_labels: HashMap<usize, BranchOffset>,
+    nextRowLabels: HashMap<usize, BranchOffset>,
+
     // labels for the instructions beginning the inner loop of a scan operator.
-    scan_loop_body_labels: Vec<BranchOffset>,
+    scanLoopBodyLabels: Vec<BranchOffset>,
+
     // metadata for the group by operator
     group_by_metadata: Option<GroupByMetadata>,
+
     // metadata for the order by operator
     sort_metadata: Option<SortMetadata>,
+
     // mapping between Join operator id and associated metadata (for left joins only)
     left_joins: HashMap<usize, LeftJoinMetadata>,
+
     // First register of the aggregation results
     pub aggregation_start_register: Option<usize>,
+
     // We need to emit result columns in the order they are present in the SELECT, but they may not be in the same order in the ORDER BY sorter.
     // This vector holds the indexes of the result columns in the ORDER BY sorter.
     pub result_column_indexes_in_orderby_sorter: HashMap<usize, usize>,
+
     // We might skip adding a SELECT result column into the ORDER BY sorter if it is an exact match in the ORDER BY keys.
     // This vector holds the indexes of the result columns that we need to skip.
     pub result_columns_to_skip_in_orderby_sorter: Option<Vec<usize>>,
@@ -103,56 +124,50 @@ pub struct Metadata {
 
 /// Initialize the program with basic setup and return initial metadata and labels
 fn prologue() -> Result<(ProgramBuilder, Metadata, BranchOffset, BranchOffset)> {
-    let mut program = ProgramBuilder::new();
-    let init_label = program.allocate_label();
-    let halt_label = program.allocate_label();
+    let mut programBuilder = ProgramBuilder::new();
 
-    program.emit_insn_with_label_dependency(
-        Insn::Init {
-            target_pc: init_label,
-        },
-        init_label,
-    );
+    let initLabel = programBuilder.allocateLabel();
+    let haltLabel = programBuilder.allocateLabel();
 
-    let start_offset = program.offset();
+    programBuilder.addInsnWithLabelDependency(Insn::Init { target_pc: initLabel }, initLabel);
 
     let metadata = Metadata {
-        termination_label_stack: vec![halt_label],
+        terminationLabelStack: vec![haltLabel],
         group_by_metadata: None,
         left_joins: HashMap::new(),
-        next_row_labels: HashMap::new(),
-        scan_loop_body_labels: vec![],
+        nextRowLabels: HashMap::new(),
+        scanLoopBodyLabels: vec![],
         sort_metadata: None,
         aggregation_start_register: None,
         result_column_indexes_in_orderby_sorter: HashMap::new(),
         result_columns_to_skip_in_orderby_sorter: None,
     };
 
-    Ok((program, metadata, init_label, start_offset))
+    let startOffset = programBuilder.nextPc();
+
+    Ok((programBuilder, metadata, initLabel, startOffset))
 }
 
 /// Clean up and finalize the program, resolving any remaining labels
 /// Note that although these are the final instructions, typically an SQLite
 /// query will jump to the Transaction instruction via init_label.
-fn epilogue(
-    program: &mut ProgramBuilder,
-    metadata: &mut Metadata,
-    init_label: BranchOffset,
-    start_offset: BranchOffset,
-) -> Result<()> {
-    let halt_label = metadata.termination_label_stack.pop().unwrap();
-    program.resolve_label(halt_label, program.offset());
-    program.emit_insn(Insn::Halt {
+fn epilogue(program: &mut ProgramBuilder,
+            metadata: &mut Metadata,
+            init_label: BranchOffset,
+            start_offset: BranchOffset) -> Result<()> {
+    let halt_label = metadata.terminationLabelStack.pop().unwrap();
+    program.resolveLabel(halt_label, program.nextPc());
+    program.addInsn0(Insn::Halt {
         err_code: 0,
         description: String::new(),
     });
 
-    program.resolve_label(init_label, program.offset());
-    program.emit_insn(Insn::Transaction { write: false });
+    program.resolveLabel(init_label, program.nextPc());
+    program.addInsn0(Insn::Transaction { write: false });
 
     program.emit_constant_insns();
-    program.emit_insn(Insn::Goto {
-        target_pc: start_offset,
+    program.addInsn0(Insn::Goto {
+        targetPc: start_offset,
     });
 
     program.resolve_deferred_labels();
@@ -162,133 +177,118 @@ fn epilogue(
 
 /// Main entry point for emitting bytecode for a SQL query
 /// Takes a query plan and generates the corresponding bytecode program
-pub fn emit_program(database_header: Rc<RefCell<DbHeader>>,
+pub fn emit_program(dbHeader: Rc<RefCell<DbHeader>>,
                     mut plan: Plan,
-                    connection: Weak<Conn>) -> Result<Program> {
-    let (mut program, mut metadata, init_label, start_offset) = prologue()?;
+                    conn: Weak<Conn>) -> Result<Program> {
+    let (mut programBuilder, mut metadata, initLabel, startOffset) = prologue()?;
 
-    // Trivial exit on LIMIT 0
     if let Some(limit) = plan.limit {
         if limit == 0 {
-            epilogue(&mut program, &mut metadata, init_label, start_offset)?;
-            return Ok(program.build(database_header, connection));
+            epilogue(&mut programBuilder, &mut metadata, initLabel, startOffset)?;
+            return Ok(programBuilder.build(dbHeader, conn));
         }
     }
 
     // No rows will be read from source table loops if there is a constant false condition eg. WHERE 0
     // however an aggregation might still happen,
     // e.g. SELECT COUNT(*) WHERE 0 returns a row with 0, not an empty result set
-    let skip_loops_label = if plan.contains_constant_false_condition {
-        let skip_loops_label = program.allocate_label();
-        program.emit_insn_with_label_dependency(
-            Insn::Goto {
-                target_pc: skip_loops_label,
-            },
-            skip_loops_label,
-        );
-        Some(skip_loops_label)
-    } else {
-        None
-    };
+    let skipLoopsLabel =
+        if plan.containsConstantFalseCondition {
+            let skipLoopsLabel = programBuilder.allocateLabel();
+            programBuilder.addInsnWithLabelDependency(Insn::Goto { targetPc: skipLoopsLabel }, skipLoopsLabel);
+            Some(skipLoopsLabel)
+        } else {
+            None
+        };
 
     // Initialize cursors and other resources needed for query execution
-    if let Some(ref mut order_by) = plan.orderByExprs {
-        init_order_by(&mut program, order_by, &mut metadata)?;
+    if let Some(ref mut orderBy) = plan.orderBys {
+        initOrderBy(&mut programBuilder, orderBy, &mut metadata)?;
     }
 
     if let Some(ref mut group_by) = plan.group_by {
-        init_group_by(&mut program, group_by, &plan.aggregates, &mut metadata)?;
+        initGroupBy(&mut programBuilder, group_by, &plan.aggregates, &mut metadata)?;
     }
-    init_source(&mut program, &plan.source, &mut metadata)?;
+
+    initSrcOperator(&mut programBuilder, &plan.srcOperator, &mut metadata)?;
 
     // Set up main query execution loop
-    open_loop(
-        &mut program,
-        &mut plan.source,
-        &plan.refTbls,
-        &mut metadata,
-    )?;
+    openLoop(&mut programBuilder,
+             &mut plan.srcOperator,
+             &plan.tblRefs,
+             &mut metadata)?;
 
     // Process result columns and expressions in the inner loop
-    inner_loop_emit(&mut program, &mut plan, &mut metadata)?;
+    inner_loop_emit(&mut programBuilder, &mut plan, &mut metadata)?;
 
     // Clean up and close the main execution loop
-    close_loop(
-        &mut program,
-        &plan.source,
-        &mut metadata,
-        &plan.refTbls,
-    )?;
+    close_loop(&mut programBuilder,
+               &plan.srcOperator,
+               &mut metadata,
+               &plan.tblRefs)?;
 
-    if let Some(skip_loops_label) = skip_loops_label {
-        program.resolve_label(skip_loops_label, program.offset());
+    if let Some(skipLoopsLabel) = skipLoopsLabel {
+        programBuilder.resolveLabel(skipLoopsLabel, programBuilder.nextPc());
     }
 
-    let mut order_by_necessary = plan.orderByExprs.is_some() && !plan.contains_constant_false_condition;
+    let mut order_by_necessary = plan.orderBys.is_some() && !plan.containsConstantFalseCondition;
 
     // Handle GROUP BY and aggregation processing
     if let Some(ref mut group_by) = plan.group_by {
-        group_by_emit(
-            &mut program,
-            &plan.result_columns,
-            group_by,
-            plan.orderByExprs.as_ref(),
-            &plan.aggregates,
-            plan.limit,
-            &plan.refTbls,
-            &mut metadata,
-        )?;
+        group_by_emit(&mut programBuilder,
+                      &plan.resultCols,
+                      group_by,
+                      plan.orderBys.as_ref(),
+                      &plan.aggregates,
+                      plan.limit,
+                      &plan.tblRefs,
+                      &mut metadata)?;
     } else if !plan.aggregates.is_empty() {
         // Handle aggregation without GROUP BY
-        agg_without_group_by_emit(
-            &mut program,
-            &plan.refTbls,
-            &plan.result_columns,
-            &plan.aggregates,
-            &mut metadata,
-        )?;
+        agg_without_group_by_emit(&mut programBuilder,
+                                  &plan.tblRefs,
+                                  &plan.resultCols,
+                                  &plan.aggregates,
+                                  &mut metadata)?;
+
         // Single row result for aggregates without GROUP BY, so ORDER BY not needed
         order_by_necessary = false;
     }
 
     // Process ORDER BY results if needed
-    if let Some(ref mut order_by) = plan.orderByExprs {
+    if let Some(ref mut order_by) = plan.orderBys {
         if order_by_necessary {
-            order_by_emit(
-                &mut program,
-                order_by,
-                &plan.result_columns,
-                plan.limit,
-                &mut metadata,
-            )?;
+            order_by_emit(&mut programBuilder,
+                          order_by,
+                          &plan.resultCols,
+                          plan.limit,
+                          &mut metadata)?;
         }
     }
 
-    // Finalize program
-    epilogue(&mut program, &mut metadata, init_label, start_offset)?;
+    // finalize program
+    epilogue(&mut programBuilder, &mut metadata, initLabel, startOffset)?;
 
-    Ok(program.build(database_header, connection))
+    Ok(programBuilder.build(dbHeader, conn))
 }
 
 /// Initialize resources needed for ORDER BY processing
-fn init_order_by(
-    program: &mut ProgramBuilder,
-    order_by: &[(ast::Expr, Direction)],
-    metadata: &mut Metadata,
-) -> Result<()> {
+fn initOrderBy(program: &mut ProgramBuilder,
+               order_by: &[(ast::Expr, Direction)],
+               metadata: &mut Metadata) -> Result<()> {
     metadata
-        .termination_label_stack
-        .push(program.allocate_label());
-    let sort_cursor = program.alloc_cursor_id(None, None);
+        .terminationLabelStack
+        .push(program.allocateLabel());
+    let sort_cursor = program.allocCursorId(None, None);
     metadata.sort_metadata = Some(SortMetadata {
         sort_cursor,
-        sorter_data_register: program.alloc_register(),
+        sorter_data_register: program.allocRegister(),
     });
     let mut order = Vec::new();
     for (_, direction) in order_by.iter() {
         order.push(OwnedValue::Integer(*direction as i64));
     }
-    program.emit_insn(Insn::SorterOpen {
+    program.addInsn0(Insn::SorterOpen {
         cursor_id: sort_cursor,
         columns: order_by.len(),
         order: OwnedRecord::new(order),
@@ -297,50 +297,50 @@ fn init_order_by(
 }
 
 /// Initialize resources needed for GROUP BY processing
-fn init_group_by(
+fn initGroupBy(
     program: &mut ProgramBuilder,
     group_by: &GroupBy,
     aggregates: &[Aggregate],
     metadata: &mut Metadata,
 ) -> Result<()> {
-    let agg_final_label = program.allocate_label();
-    metadata.termination_label_stack.push(agg_final_label);
+    let agg_final_label = program.allocateLabel();
+    metadata.terminationLabelStack.push(agg_final_label);
     let num_aggs = aggregates.len();
 
-    let sort_cursor = program.alloc_cursor_id(None, None);
+    let sort_cursor = program.allocCursorId(None, None);
 
-    let abort_flag_register = program.alloc_register();
-    let data_in_accumulator_indicator_register = program.alloc_register();
-    let group_exprs_comparison_register = program.alloc_registers(group_by.exprs.len());
-    let group_exprs_accumulator_register = program.alloc_registers(group_by.exprs.len());
-    let agg_exprs_start_reg = program.alloc_registers(num_aggs);
-    let sorter_key_register = program.alloc_register();
+    let abort_flag_register = program.allocRegister();
+    let data_in_accumulator_indicator_register = program.allocRegister();
+    let group_exprs_comparison_register = program.allocRegisters(group_by.exprs.len());
+    let group_exprs_accumulator_register = program.allocRegisters(group_by.exprs.len());
+    let agg_exprs_start_reg = program.allocRegisters(num_aggs);
+    let sorter_key_register = program.allocRegister();
 
-    let subroutine_accumulator_clear_label = program.allocate_label();
-    let subroutine_accumulator_output_label = program.allocate_label();
+    let subroutine_accumulator_clear_label = program.allocateLabel();
+    let subroutine_accumulator_output_label = program.allocateLabel();
 
     let mut order = Vec::new();
     const ASCENDING: i64 = 0;
     for _ in group_by.exprs.iter() {
         order.push(OwnedValue::Integer(ASCENDING));
     }
-    program.emit_insn(Insn::SorterOpen {
+    program.addInsn0(Insn::SorterOpen {
         cursor_id: sort_cursor,
         columns: aggregates.len() + group_by.exprs.len(),
         order: OwnedRecord::new(order),
     });
 
-    program.add_comment(program.offset(), "clear group by abort flag");
-    program.emit_insn(Insn::Integer {
+    program.add_comment(program.nextPc(), "clear group by abort flag");
+    program.addInsn0(Insn::Integer {
         value: 0,
-        dest: abort_flag_register,
+        destReg: abort_flag_register,
     });
 
     program.add_comment(
-        program.offset(),
+        program.nextPc(),
         "initialize group by comparison registers to NULL",
     );
-    program.emit_insn(Insn::Null {
+    program.addInsn0(Insn::Null {
         dest: group_exprs_comparison_register,
         dest_end: if group_by.exprs.len() > 1 {
             Some(group_exprs_comparison_register + group_by.exprs.len() - 1)
@@ -349,10 +349,10 @@ fn init_group_by(
         },
     });
 
-    program.add_comment(program.offset(), "go to clear accumulator subroutine");
+    program.add_comment(program.nextPc(), "go to clear accumulator subroutine");
 
-    let subroutine_accumulator_clear_return_offset_register = program.alloc_register();
-    program.emit_insn_with_label_dependency(
+    let subroutine_accumulator_clear_return_offset_register = program.allocRegister();
+    program.addInsnWithLabelDependency(
         Insn::Gosub {
             target_pc: subroutine_accumulator_clear_label,
             return_reg: subroutine_accumulator_clear_return_offset_register,
@@ -367,8 +367,8 @@ fn init_group_by(
         subroutine_accumulator_clear_label,
         subroutine_accumulator_clear_return_offset_register,
         subroutine_accumulator_output_label,
-        subroutine_accumulator_output_return_offset_register: program.alloc_register(),
-        accumulator_indicator_set_true_label: program.allocate_label(),
+        subroutine_accumulator_output_return_offset_register: program.allocRegister(),
+        accumulator_indicator_set_true_label: program.allocateLabel(),
         abort_flag_register,
         data_in_accumulator_indicator_register,
         group_exprs_accumulator_register,
@@ -379,101 +379,85 @@ fn init_group_by(
 }
 
 /// Initialize resources needed for the source operators (tables, joins, etc)
-fn init_source(
-    program: &mut ProgramBuilder,
-    source: &SrcOperator,
-    metadata: &mut Metadata,
-) -> Result<()> {
-    match source {
-        SrcOperator::Join {
-            id,
-            left,
-            right,
-            outer,
-            ..
-        } => {
+fn initSrcOperator(programBuilder: &mut ProgramBuilder,
+                   srcOperator: &SrcOperator,
+                   metadata: &mut Metadata) -> Result<()> {
+    match srcOperator {
+        SrcOperator::Join { id, left, right, outer, .. } => {
             if *outer {
                 let lj_metadata = LeftJoinMetadata {
-                    match_flag_register: program.alloc_register(),
-                    set_match_flag_true_label: program.allocate_label(),
-                    check_match_flag_label: program.allocate_label(),
+                    match_flag_register: programBuilder.allocRegister(),
+                    set_match_flag_true_label: programBuilder.allocateLabel(),
+                    check_match_flag_label: programBuilder.allocateLabel(),
                 };
+
                 metadata.left_joins.insert(*id, lj_metadata);
             }
-            init_source(program, left, metadata)?;
-            init_source(program, right, metadata)?;
 
-            return Ok(());
+            initSrcOperator(programBuilder, left, metadata)?;
+            initSrcOperator(programBuilder, right, metadata)?;
+
+            Ok(())
         }
-        SrcOperator::Scan {
-            id,
-            tblRef: table_reference,
-            ..
-        } => {
-            let cursor_id = program.alloc_cursor_id(
-                Some(table_reference.table_identifier.clone()),
-                Some(Table::BTree(table_reference.table.clone())),
-            );
-            let root_page = table_reference.table.root_page;
-            let next_row_label = program.allocate_label();
-            metadata.next_row_labels.insert(*id, next_row_label);
-            program.emit_insn(Insn::OpenReadAsync {
-                cursor_id,
-                root_page,
+        SrcOperator::Search { id, tblRef, indexSearch: indexSearch, .. } => {
+            let cursorIdTbl =
+                programBuilder.allocCursorId(Some(tblRef.table_identifier.clone()),
+                                             Some(Table::BTree(tblRef.table.clone())));
+
+            metadata.nextRowLabels.insert(*id, programBuilder.allocateLabel());
+
+            programBuilder.addInsn0(Insn::OpenReadAsync {
+                cursorId: cursorIdTbl,
+                rootPage: tblRef.table.rootPage,
             });
-            program.emit_insn(Insn::OpenReadAwait);
 
-            return Ok(());
-        }
-        SrcOperator::Search {
-            id,
-            table_reference,
-            search,
-            ..
-        } => {
-            let table_cursor_id = program.alloc_cursor_id(
-                Some(table_reference.table_identifier.clone()),
-                Some(Table::BTree(table_reference.table.clone())),
-            );
+            programBuilder.addInsn0(Insn::OpenReadAwait);
 
-            let next_row_label = program.allocate_label();
+            //------------------------------------------------------------------------
 
-            metadata.next_row_labels.insert(*id, next_row_label);
+            if let IndexSearch::IndexSearch { index, .. } = indexSearch {
+                let cursorIdIndex =
+                    programBuilder.allocCursorId(Some(index.name.clone()),
+                                                 Some(Table::Index(index.clone())));
 
-            program.emit_insn(Insn::OpenReadAsync {
-                cursor_id: table_cursor_id,
-                root_page: table_reference.table.root_page,
-            });
-            program.emit_insn(Insn::OpenReadAwait);
-
-            if let IndexSearch::IndexSearch { index, .. } = search {
-                let index_cursor_id = program
-                    .alloc_cursor_id(Some(index.name.clone()), Some(Table::Index(index.clone())));
-                program.emit_insn(Insn::OpenReadAsync {
-                    cursor_id: index_cursor_id,
-                    root_page: index.root_page,
+                programBuilder.addInsn0(Insn::OpenReadAsync {
+                    cursorId: cursorIdIndex,
+                    rootPage: index.rootPage,
                 });
-                program.emit_insn(Insn::OpenReadAwait);
+
+                programBuilder.addInsn0(Insn::OpenReadAwait);
             }
 
-            return Ok(());
+            Ok(())
         }
-        SrcOperator::Nothing => {
-            return Ok(());
+        SrcOperator::Scan { id, tblRef, .. } => {
+            let cursorIdTbl =
+                programBuilder.allocCursorId(Some(tblRef.table_identifier.clone()),
+                                             Some(Table::BTree(tblRef.table.clone())));
+
+            metadata.nextRowLabels.insert(*id, programBuilder.allocateLabel());
+
+            programBuilder.addInsn0(Insn::OpenReadAsync {
+                cursorId: cursorIdTbl,
+                rootPage: tblRef.table.rootPage,
+            });
+
+            programBuilder.addInsn0(Insn::OpenReadAwait);
+
+            Ok(())
         }
+        SrcOperator::Nothing => Ok(())
     }
 }
 
 /// Set up the main query execution loop
 /// For example in the case of a nested table scan, this means emitting the RewindAsync instruction
 /// for all tables involved, outermost first.
-fn open_loop(
-    program: &mut ProgramBuilder,
-    source: &mut SrcOperator,
-    referenced_tables: &[BTreeTableRef],
-    metadata: &mut Metadata,
-) -> Result<()> {
-    match source {
+fn openLoop(programBuilder: &mut ProgramBuilder,
+            srcOperator: &mut SrcOperator,
+            tblRefs: &[BTreeTableRef],
+            metadata: &mut Metadata) -> Result<()> {
+    match srcOperator {
         SrcOperator::Join {
             id,
             left,
@@ -482,83 +466,253 @@ fn open_loop(
             outer,
             ..
         } => {
-            open_loop(program, left, referenced_tables, metadata)?;
+            openLoop(programBuilder, left, tblRefs, metadata)?;
 
-            let mut jump_target_when_false = *metadata
-                .next_row_labels
-                .get(&right.id())
-                .or(metadata.next_row_labels.get(&left.id()))
-                .unwrap_or(metadata.termination_label_stack.last().unwrap());
+            let mut jumpDestWhenFalse =
+                *metadata.nextRowLabels.get(&right.id()).or(metadata.nextRowLabels.get(&left.id())).unwrap_or(metadata.terminationLabelStack.last().unwrap());
 
             if *outer {
                 let lj_meta = metadata.left_joins.get(id).unwrap();
-                program.emit_insn(Insn::Integer {
+                programBuilder.addInsn0(Insn::Integer {
                     value: 0,
-                    dest: lj_meta.match_flag_register,
+                    destReg: lj_meta.match_flag_register,
                 });
-                jump_target_when_false = lj_meta.check_match_flag_label;
+                jumpDestWhenFalse = lj_meta.check_match_flag_label;
             }
-            metadata
-                .next_row_labels
-                .insert(right.id(), jump_target_when_false);
 
-            open_loop(program, right, referenced_tables, metadata)?;
+            metadata.nextRowLabels.insert(right.id(), jumpDestWhenFalse);
+
+            openLoop(programBuilder, right, tblRefs, metadata)?;
 
             if let Some(predicates) = predicates {
-                let jump_target_when_true = program.allocate_label();
+                let jump_target_when_true = programBuilder.allocateLabel();
                 let condition_metadata = ConditionMetadata {
                     jump_if_condition_is_true: false,
                     jump_target_when_true,
-                    jump_target_when_false,
+                    jump_target_when_false: jumpDestWhenFalse,
                 };
                 for predicate in predicates.iter() {
                     translate_condition_expr(
-                        program,
-                        referenced_tables,
+                        programBuilder,
+                        tblRefs,
                         predicate,
                         condition_metadata,
                         None,
                     )?;
                 }
-                program.resolve_label(jump_target_when_true, program.offset());
+                programBuilder.resolveLabel(jump_target_when_true, programBuilder.nextPc());
             }
 
             if *outer {
                 let lj_meta = metadata.left_joins.get(id).unwrap();
-                program.defer_label_resolution(
+                programBuilder.defer_label_resolution(
                     lj_meta.set_match_flag_true_label,
-                    program.offset() as usize,
+                    programBuilder.nextPc() as usize,
                 );
-                program.emit_insn(Insn::Integer {
+                programBuilder.addInsn0(Insn::Integer {
                     value: 1,
-                    dest: lj_meta.match_flag_register,
+                    destReg: lj_meta.match_flag_register,
                 });
             }
 
-            return Ok(());
+            Ok(())
+        }
+        SrcOperator::Search { id, tblRef, indexSearch, predicates, .. } => {
+            let tblCursorId = programBuilder.resolveCursorId(&tblRef.table_identifier);
+
+            // Open the loop for the index search.
+            // Rowid equality point lookups are handled with a SeekRowid instruction which does not loop, since it is a single row lookup.
+            if !matches!(indexSearch, IndexSearch::RowidEq { .. }) {
+                let index_cursor_id = if let IndexSearch::IndexSearch { index, .. } = indexSearch {
+                    Some(programBuilder.resolveCursorId(&index.name))
+                } else {
+                    None
+                };
+
+                let scanLoopBodyLabel = programBuilder.allocateLabel();
+                metadata.scanLoopBodyLabels.push(scanLoopBodyLabel);
+
+                let cmpRegister = programBuilder.allocRegister();
+
+                let (cmp_expr, cmp_op) = match indexSearch {
+                    IndexSearch::IndexSearch { cmp_expr, cmp_op, .. } => (cmp_expr, cmp_op),
+                    IndexSearch::RowidSearch { cmp_expr, cmp_op } => (cmp_expr, cmp_op),
+                    IndexSearch::RowidEq { .. } => unreachable!(),
+                };
+
+                // TODO this only handles ascending indexes
+                match cmp_op {
+                    ast::Operator::Equals | ast::Operator::Greater | ast::Operator::GreaterEquals => _ = expr::translateExpr(programBuilder, Some(tblRefs), cmp_expr, cmpRegister, None)?,
+                    ast::Operator::Less | ast::Operator::LessEquals => programBuilder.addInsn0(Insn::Null { dest: cmpRegister, dest_end: None }),
+                    _ => unreachable!(),
+                }
+
+                programBuilder.addInsnWithLabelDependency(
+                    match cmp_op {
+                        ast::Operator::Equals | ast::Operator::GreaterEquals =>
+                            Insn::SeekGE {
+                                is_index: index_cursor_id.is_some(),
+                                cursor_id: index_cursor_id.unwrap_or(tblCursorId),
+                                start_reg: cmpRegister,
+                                num_regs: 1,
+                                target_pc: *metadata.terminationLabelStack.last().unwrap(),
+                            },
+                        ast::Operator::Greater | ast::Operator::Less | ast::Operator::LessEquals =>
+                            Insn::SeekGT {
+                                is_index: index_cursor_id.is_some(),
+                                cursor_id: index_cursor_id.unwrap_or(tblCursorId),
+                                start_reg: cmpRegister,
+                                num_regs: 1,
+                                target_pc: *metadata.terminationLabelStack.last().unwrap(),
+                            },
+                        _ => unreachable!(),
+                    },
+                    *metadata.terminationLabelStack.last().unwrap(),
+                );
+
+                if *cmp_op == ast::Operator::Less || *cmp_op == ast::Operator::LessEquals {
+                    expr::translateExpr(programBuilder, Some(tblRefs), cmp_expr, cmpRegister, None)?;
+                }
+
+                programBuilder.defer_label_resolution(scanLoopBodyLabel, programBuilder.nextPc() as usize);
+
+                // TODO: We are currently only handling ascending indexes.
+                // For conditions like index_key > 10, we have already seeked to the first key greater than 10, and can just scan forward.
+                // For conditions like index_key < 10, we are at the beginning of the index, and will scan forward and emit IdxGE(10) with a conditional jump to the end.
+                // For conditions like index_key = 10, we have already seeked to the first key greater than or equal to 10, and can just scan forward and emit IdxGT(10) with a conditional jump to the end.
+                // For conditions like index_key >= 10, we have already seeked to the first key greater than or equal to 10, and can just scan forward.
+                // For conditions like index_key <= 10, we are at the beginning of the index, and will scan forward and emit IdxGT(10) with a conditional jump to the end.
+                // For conditions like index_key != 10, TODO. probably the optimal way is not to use an index at all.
+                //
+                // For primary key searches we emit RowId and then compare it to the seek value.
+
+                let abort_jump_target = *metadata.nextRowLabels.get(id).unwrap_or(metadata.terminationLabelStack.last().unwrap());
+
+                match cmp_op {
+                    ast::Operator::Equals | ast::Operator::LessEquals => {
+                        if let Some(index_cursor_id) = index_cursor_id {
+                            programBuilder.addInsnWithLabelDependency(
+                                Insn::IdxGT {
+                                    cursor_id: index_cursor_id,
+                                    start_reg: cmpRegister,
+                                    num_regs: 1,
+                                    target_pc: abort_jump_target,
+                                },
+                                abort_jump_target,
+                            );
+                        } else {
+                            let rowid_reg = programBuilder.allocRegister();
+                            programBuilder.addInsn0(Insn::RowId {
+                                cursor_id: tblCursorId,
+                                dest: rowid_reg,
+                            });
+                            programBuilder.addInsnWithLabelDependency(
+                                Insn::Gt {
+                                    lhs: rowid_reg,
+                                    rhs: cmpRegister,
+                                    target_pc: abort_jump_target,
+                                },
+                                abort_jump_target,
+                            );
+                        }
+                    }
+                    ast::Operator::Less => {
+                        if let Some(index_cursor_id) = index_cursor_id {
+                            programBuilder.addInsnWithLabelDependency(
+                                Insn::IdxGE {
+                                    cursor_id: index_cursor_id,
+                                    start_reg: cmpRegister,
+                                    num_regs: 1,
+                                    target_pc: abort_jump_target,
+                                },
+                                abort_jump_target,
+                            );
+                        } else {
+                            let rowid_reg = programBuilder.allocRegister();
+                            programBuilder.addInsn0(Insn::RowId {
+                                cursor_id: tblCursorId,
+                                dest: rowid_reg,
+                            });
+                            programBuilder.addInsnWithLabelDependency(
+                                Insn::Ge {
+                                    lhs: rowid_reg,
+                                    rhs: cmpRegister,
+                                    target_pc: abort_jump_target,
+                                },
+                                abort_jump_target,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+
+                if let Some(index_cursor_id) = index_cursor_id {
+                    programBuilder.addInsn0(Insn::DeferredSeek {
+                        index_cursor_id,
+                        table_cursor_id: tblCursorId,
+                    });
+                }
+            }
+
+            let jump_label = metadata.nextRowLabels.get(id).unwrap();
+
+            if let IndexSearch::RowidEq { cmp_expr } = indexSearch {
+                let srcReg = programBuilder.allocRegister();
+
+                expr::translateExpr(programBuilder, Some(tblRefs), cmp_expr, srcReg, None)?;
+
+                programBuilder.addInsnWithLabelDependency(
+                    Insn::SeekRowid {
+                        cursor_id: tblCursorId,
+                        srcReg,
+                        target_pc: *jump_label,
+                    },
+                    *jump_label,
+                );
+            }
+
+            if let Some(whereExprs) = predicates {
+                for predicate in whereExprs.iter() {
+                    let jump_target_when_true = programBuilder.allocateLabel();
+
+                    let condition_metadata = ConditionMetadata {
+                        jump_if_condition_is_true: false,
+                        jump_target_when_true,
+                        jump_target_when_false: *jump_label,
+                    };
+
+                    translate_condition_expr(
+                        programBuilder,
+                        tblRefs,
+                        predicate,
+                        condition_metadata,
+                        None,
+                    )?;
+
+                    programBuilder.resolveLabel(jump_target_when_true, programBuilder.nextPc());
+                }
+            }
+
+            Ok(())
         }
         SrcOperator::Scan {
             id,
             tblRef: table_reference,
             whereExprs: predicates,
-            iter_dir,
+            iterDirection: iter_dir,
         } => {
-            let cursor_id = program.resolve_cursor_id(&table_reference.table_identifier);
-            if iter_dir
-                .as_ref()
-                .is_some_and(|dir| *dir == IterationDirection::Backwards)
-            {
-                program.emit_insn(Insn::LastAsync { cursor_id });
+            let cursor_id = programBuilder.resolveCursorId(&table_reference.table_identifier);
+
+            if iter_dir.as_ref().is_some_and(|dir| *dir == IterationDirection::Backwards) {
+                programBuilder.addInsn0(Insn::LastAsync { cursor_id });
             } else {
-                program.emit_insn(Insn::RewindAsync { cursor_id });
+                programBuilder.addInsn0(Insn::RewindAsync { cursor_id });
             }
-            let scan_loop_body_label = program.allocate_label();
-            let halt_label = metadata.termination_label_stack.last().unwrap();
-            program.emit_insn_with_label_dependency(
-                if iter_dir
-                    .as_ref()
-                    .is_some_and(|dir| *dir == IterationDirection::Backwards)
-                {
+
+            let scan_loop_body_label = programBuilder.allocateLabel();
+            let halt_label = metadata.terminationLabelStack.last().unwrap();
+            programBuilder.addInsnWithLabelDependency(
+                if iter_dir.as_ref().is_some_and(|dir| *dir == IterationDirection::Backwards) {
                     Insn::LastAwait {
                         cursor_id,
                         pc_if_empty: *halt_label,
@@ -571,217 +725,35 @@ fn open_loop(
                 },
                 *halt_label,
             );
-            metadata.scan_loop_body_labels.push(scan_loop_body_label);
-            program.defer_label_resolution(scan_loop_body_label, program.offset() as usize);
 
-            let jump_label = metadata.next_row_labels.get(id).unwrap_or(halt_label);
+            metadata.scanLoopBodyLabels.push(scan_loop_body_label);
+            programBuilder.defer_label_resolution(scan_loop_body_label, programBuilder.nextPc() as usize);
+
+            let jump_label = metadata.nextRowLabels.get(id).unwrap_or(halt_label);
+
             if let Some(preds) = predicates {
                 for expr in preds {
-                    let jump_target_when_true = program.allocate_label();
+                    let jump_target_when_true = programBuilder.allocateLabel();
+
                     let condition_metadata = ConditionMetadata {
                         jump_if_condition_is_true: false,
                         jump_target_when_true,
                         jump_target_when_false: *jump_label,
                     };
-                    translate_condition_expr(
-                        program,
-                        referenced_tables,
-                        expr,
-                        condition_metadata,
-                        None,
-                    )?;
-                    program.resolve_label(jump_target_when_true, program.offset());
+
+                    translate_condition_expr(programBuilder,
+                                             tblRefs,
+                                             expr,
+                                             condition_metadata,
+                                             None)?;
+
+                    programBuilder.resolveLabel(jump_target_when_true, programBuilder.nextPc());
                 }
             }
 
-            return Ok(());
+            Ok(())
         }
-        SrcOperator::Search {
-            id,
-            table_reference,
-            search,
-            predicates,
-            ..
-        } => {
-            let table_cursor_id = program.resolve_cursor_id(&table_reference.table_identifier);
-            // Open the loop for the index search.
-            // Rowid equality point lookups are handled with a SeekRowid instruction which does not loop, since it is a single row lookup.
-            if !matches!(search, IndexSearch::RowidEq { .. }) {
-                let index_cursor_id = if let IndexSearch::IndexSearch { index, .. } = search {
-                    Some(program.resolve_cursor_id(&index.name))
-                } else {
-                    None
-                };
-                let scan_loop_body_label = program.allocate_label();
-                metadata.scan_loop_body_labels.push(scan_loop_body_label);
-                let cmp_reg = program.alloc_register();
-                let (cmp_expr, cmp_op) = match search {
-                    IndexSearch::IndexSearch {
-                        cmp_expr, cmp_op, ..
-                    } => (cmp_expr, cmp_op),
-                    IndexSearch::RowidSearch { cmp_expr, cmp_op } => (cmp_expr, cmp_op),
-                    IndexSearch::RowidEq { .. } => unreachable!(),
-                };
-                // TODO this only handles ascending indexes
-                match cmp_op {
-                    ast::Operator::Equals
-                    | ast::Operator::Greater
-                    | ast::Operator::GreaterEquals => {
-                        translate_expr(program, Some(referenced_tables), cmp_expr, cmp_reg, None)?;
-                    }
-                    ast::Operator::Less | ast::Operator::LessEquals => {
-                        program.emit_insn(Insn::Null {
-                            dest: cmp_reg,
-                            dest_end: None,
-                        });
-                    }
-                    _ => unreachable!(),
-                }
-                program.emit_insn_with_label_dependency(
-                    match cmp_op {
-                        ast::Operator::Equals | ast::Operator::GreaterEquals => Insn::SeekGE {
-                            is_index: index_cursor_id.is_some(),
-                            cursor_id: index_cursor_id.unwrap_or(table_cursor_id),
-                            start_reg: cmp_reg,
-                            num_regs: 1,
-                            target_pc: *metadata.termination_label_stack.last().unwrap(),
-                        },
-                        ast::Operator::Greater
-                        | ast::Operator::Less
-                        | ast::Operator::LessEquals => Insn::SeekGT {
-                            is_index: index_cursor_id.is_some(),
-                            cursor_id: index_cursor_id.unwrap_or(table_cursor_id),
-                            start_reg: cmp_reg,
-                            num_regs: 1,
-                            target_pc: *metadata.termination_label_stack.last().unwrap(),
-                        },
-                        _ => unreachable!(),
-                    },
-                    *metadata.termination_label_stack.last().unwrap(),
-                );
-                if *cmp_op == ast::Operator::Less || *cmp_op == ast::Operator::LessEquals {
-                    translate_expr(program, Some(referenced_tables), cmp_expr, cmp_reg, None)?;
-                }
-
-                program.defer_label_resolution(scan_loop_body_label, program.offset() as usize);
-                // TODO: We are currently only handling ascending indexes.
-                // For conditions like index_key > 10, we have already seeked to the first key greater than 10, and can just scan forward.
-                // For conditions like index_key < 10, we are at the beginning of the index, and will scan forward and emit IdxGE(10) with a conditional jump to the end.
-                // For conditions like index_key = 10, we have already seeked to the first key greater than or equal to 10, and can just scan forward and emit IdxGT(10) with a conditional jump to the end.
-                // For conditions like index_key >= 10, we have already seeked to the first key greater than or equal to 10, and can just scan forward.
-                // For conditions like index_key <= 10, we are at the beginning of the index, and will scan forward and emit IdxGT(10) with a conditional jump to the end.
-                // For conditions like index_key != 10, TODO. probably the optimal way is not to use an index at all.
-                //
-                // For primary key searches we emit RowId and then compare it to the seek value.
-
-                let abort_jump_target = *metadata
-                    .next_row_labels
-                    .get(id)
-                    .unwrap_or(metadata.termination_label_stack.last().unwrap());
-                match cmp_op {
-                    ast::Operator::Equals | ast::Operator::LessEquals => {
-                        if let Some(index_cursor_id) = index_cursor_id {
-                            program.emit_insn_with_label_dependency(
-                                Insn::IdxGT {
-                                    cursor_id: index_cursor_id,
-                                    start_reg: cmp_reg,
-                                    num_regs: 1,
-                                    target_pc: abort_jump_target,
-                                },
-                                abort_jump_target,
-                            );
-                        } else {
-                            let rowid_reg = program.alloc_register();
-                            program.emit_insn(Insn::RowId {
-                                cursor_id: table_cursor_id,
-                                dest: rowid_reg,
-                            });
-                            program.emit_insn_with_label_dependency(
-                                Insn::Gt {
-                                    lhs: rowid_reg,
-                                    rhs: cmp_reg,
-                                    target_pc: abort_jump_target,
-                                },
-                                abort_jump_target,
-                            );
-                        }
-                    }
-                    ast::Operator::Less => {
-                        if let Some(index_cursor_id) = index_cursor_id {
-                            program.emit_insn_with_label_dependency(
-                                Insn::IdxGE {
-                                    cursor_id: index_cursor_id,
-                                    start_reg: cmp_reg,
-                                    num_regs: 1,
-                                    target_pc: abort_jump_target,
-                                },
-                                abort_jump_target,
-                            );
-                        } else {
-                            let rowid_reg = program.alloc_register();
-                            program.emit_insn(Insn::RowId {
-                                cursor_id: table_cursor_id,
-                                dest: rowid_reg,
-                            });
-                            program.emit_insn_with_label_dependency(
-                                Insn::Ge {
-                                    lhs: rowid_reg,
-                                    rhs: cmp_reg,
-                                    target_pc: abort_jump_target,
-                                },
-                                abort_jump_target,
-                            );
-                        }
-                    }
-                    _ => {}
-                }
-
-                if let Some(index_cursor_id) = index_cursor_id {
-                    program.emit_insn(Insn::DeferredSeek {
-                        index_cursor_id,
-                        table_cursor_id,
-                    });
-                }
-            }
-
-            let jump_label = metadata.next_row_labels.get(id).unwrap();
-
-            if let IndexSearch::RowidEq { cmp_expr } = search {
-                let src_reg = program.alloc_register();
-                translate_expr(program, Some(referenced_tables), cmp_expr, src_reg, None)?;
-                program.emit_insn_with_label_dependency(
-                    Insn::SeekRowid {
-                        cursor_id: table_cursor_id,
-                        src_reg,
-                        target_pc: *jump_label,
-                    },
-                    *jump_label,
-                );
-            }
-            if let Some(predicates) = predicates {
-                for predicate in predicates.iter() {
-                    let jump_target_when_true = program.allocate_label();
-                    let condition_metadata = ConditionMetadata {
-                        jump_if_condition_is_true: false,
-                        jump_target_when_true,
-                        jump_target_when_false: *jump_label,
-                    };
-                    translate_condition_expr(
-                        program,
-                        referenced_tables,
-                        predicate,
-                        condition_metadata,
-                        None,
-                    )?;
-                    program.resolve_label(jump_target_when_true, program.offset());
-                }
-            }
-
-            return Ok(());
-        }
-        SrcOperator::Nothing => {
-            return Ok(());
-        }
+        SrcOperator::Nothing => Ok(()),
     }
 }
 
@@ -816,14 +788,14 @@ fn inner_loop_emit(
     if let Some(group_by) = &plan.group_by {
         return inner_loop_source_emit(
             program,
-            &plan.result_columns,
+            &plan.resultCols,
             &plan.aggregates,
             metadata,
             InnerLoopEmitTarget::GroupBySorter {
                 group_by,
                 aggregates: &plan.aggregates,
             },
-            &plan.refTbls,
+            &plan.tblRefs,
         );
     }
     // if we DONT have a group by, but we have aggregates, we emit without ResultRow.
@@ -831,32 +803,32 @@ fn inner_loop_emit(
     if !plan.aggregates.is_empty() {
         return inner_loop_source_emit(
             program,
-            &plan.result_columns,
+            &plan.resultCols,
             &plan.aggregates,
             metadata,
             InnerLoopEmitTarget::AggStep,
-            &plan.refTbls,
+            &plan.tblRefs,
         );
     }
     // if we DONT have a group by, but we have an order by, we emit a record into the order by sorter.
-    if let Some(order_by) = &plan.orderByExprs {
+    if let Some(order_by) = &plan.orderBys {
         return inner_loop_source_emit(
             program,
-            &plan.result_columns,
+            &plan.resultCols,
             &plan.aggregates,
             metadata,
             InnerLoopEmitTarget::OrderBySorter { order_by },
-            &plan.refTbls,
+            &plan.tblRefs,
         );
     }
     // if we have neither, we emit a ResultRow. In that case, if we have a Limit, we handle that with DecrJumpZero.
     return inner_loop_source_emit(
         program,
-        &plan.result_columns,
+        &plan.resultCols,
         &plan.aggregates,
         metadata,
         InnerLoopEmitTarget::ResultRow { limit: plan.limit },
-        &plan.refTbls,
+        &plan.tblRefs,
     );
 }
 
@@ -880,14 +852,14 @@ fn inner_loop_source_emit(
             let aggregate_arguments_count =
                 aggregates.iter().map(|agg| agg.args.len()).sum::<usize>();
             let column_count = sort_keys_count + aggregate_arguments_count;
-            let start_reg = program.alloc_registers(column_count);
+            let start_reg = program.allocRegisters(column_count);
             let mut cur_reg = start_reg;
 
             // The group by sorter rows will contain the grouping keys first. They are also the sort keys.
             for expr in group_by.exprs.iter() {
                 let key_reg = cur_reg;
                 cur_reg += 1;
-                translate_expr(program, Some(referenced_tables), expr, key_reg, None)?;
+                expr::translateExpr(program, Some(referenced_tables), expr, key_reg, None)?;
             }
             // Then we have the aggregate arguments.
             for agg in aggregates.iter() {
@@ -900,7 +872,7 @@ fn inner_loop_source_emit(
                 for expr in agg.args.iter() {
                     let agg_reg = cur_reg;
                     cur_reg += 1;
-                    translate_expr(program, Some(referenced_tables), expr, agg_reg, None)?;
+                    expr::translateExpr(program, Some(referenced_tables), expr, agg_reg, None)?;
                 }
             }
 
@@ -932,10 +904,10 @@ fn inner_loop_source_emit(
             Ok(())
         }
         InnerLoopEmitTarget::AggStep => {
-            let agg_final_label = program.allocate_label();
-            metadata.termination_label_stack.push(agg_final_label);
+            let agg_final_label = program.allocateLabel();
+            metadata.terminationLabelStack.push(agg_final_label);
             let num_aggs = aggregates.len();
-            let start_reg = program.alloc_registers(num_aggs);
+            let start_reg = program.allocRegisters(num_aggs);
             metadata.aggregation_start_register = Some(start_reg);
 
             // In planner.rs, we have collected all aggregates from the SELECT clause, including ones where the aggregate is embedded inside
@@ -954,7 +926,7 @@ fn inner_loop_source_emit(
                     continue;
                 }
                 let reg = start_reg + num_aggs + i;
-                translate_expr(program, Some(referenced_tables), &rc.expr, reg, None)?;
+                expr::translateExpr(program, Some(referenced_tables), &rc.expr, reg, None)?;
             }
             Ok(())
         }
@@ -968,7 +940,7 @@ fn inner_loop_source_emit(
                 referenced_tables,
                 result_columns,
                 None,
-                limit.map(|l| (l, *metadata.termination_label_stack.last().unwrap())),
+                limit.map(|l| (l, *metadata.terminationLabelStack.last().unwrap())),
             )?;
 
             Ok(())
@@ -999,9 +971,9 @@ fn close_loop(program: &mut ProgramBuilder,
                 // (e.g. SELECT * FROM t1 LEFT JOIN t2 ON t1.a = t2.a).
                 // If the left join match flag has been set to 1, we jump to the next row on the outer table,
                 // i.e. continue to the next row of t1 in our example.
-                program.resolve_label(lj_meta.check_match_flag_label, program.offset());
-                let jump_offset = program.offset() + 3;
-                program.emit_insn(Insn::IfPos {
+                program.resolveLabel(lj_meta.check_match_flag_label, program.nextPc());
+                let jump_offset = program.nextPc() + 3;
+                program.addInsn0(Insn::IfPos {
                     reg: lj_meta.match_flag_register,
                     target_pc: jump_offset,
                     decrement_by: 0,
@@ -1013,13 +985,13 @@ fn close_loop(program: &mut ProgramBuilder,
                 let right_cursor_id = match right.as_ref() {
                     SrcOperator::Scan {
                         tblRef: table_reference, ..
-                    } => program.resolve_cursor_id(&table_reference.table_identifier),
+                    } => program.resolveCursorId(&table_reference.table_identifier),
                     SrcOperator::Search {
-                        table_reference, ..
-                    } => program.resolve_cursor_id(&table_reference.table_identifier),
+                        tblRef: table_reference, ..
+                    } => program.resolveCursorId(&table_reference.table_identifier),
                     _ => unreachable!(),
                 };
-                program.emit_insn(Insn::NullRow {
+                program.addInsn0(Insn::NullRow {
                     cursor_id: right_cursor_id,
                 });
                 // Then we jump to setting the left join match flag to 1 again,
@@ -1028,14 +1000,14 @@ fn close_loop(program: &mut ProgramBuilder,
                 // and we will end up back in the IfPos instruction above, which will then
                 // check the match flag again, and since it is now 1, we will jump to the
                 // next row in the left table.
-                program.emit_insn_with_label_dependency(
+                program.addInsnWithLabelDependency(
                     Insn::Goto {
-                        target_pc: lj_meta.set_match_flag_true_label,
+                        targetPc: lj_meta.set_match_flag_true_label,
                     },
                     lj_meta.set_match_flag_true_label,
                 );
 
-                assert!(program.offset() == jump_offset);
+                assert!(program.nextPc() == jump_offset);
             }
 
             close_loop(program, left, metadata, referenced_tables)?;
@@ -1045,21 +1017,21 @@ fn close_loop(program: &mut ProgramBuilder,
         SrcOperator::Scan {
             id,
             tblRef: table_reference,
-            iter_dir,
+            iterDirection: iter_dir,
             ..
         } => {
-            let cursor_id = program.resolve_cursor_id(&table_reference.table_identifier);
-            program.resolve_label(*metadata.next_row_labels.get(id).unwrap(), program.offset());
+            let cursor_id = program.resolveCursorId(&table_reference.table_identifier);
+            program.resolveLabel(*metadata.nextRowLabels.get(id).unwrap(), program.nextPc());
             if iter_dir.as_ref().is_some_and(|dir| *dir == IterationDirection::Backwards) {
-                program.emit_insn(Insn::PrevAsync { cursor_id });
+                program.addInsn0(Insn::PrevAsync { cursor_id });
             } else {
-                program.emit_insn(Insn::NextAsync { cursor_id });
+                program.addInsn0(Insn::NextAsync { cursor_id });
             }
 
-            let jump_label = metadata.scan_loop_body_labels.pop().unwrap();
+            let jump_label = metadata.scanLoopBodyLabels.pop().unwrap();
 
             if iter_dir.as_ref().is_some_and(|dir| *dir == IterationDirection::Backwards) {
-                program.emit_insn_with_label_dependency(
+                program.addInsnWithLabelDependency(
                     Insn::PrevAwait {
                         cursor_id,
                         pc_if_next: jump_label,
@@ -1067,7 +1039,7 @@ fn close_loop(program: &mut ProgramBuilder,
                     jump_label,
                 );
             } else {
-                program.emit_insn_with_label_dependency(
+                program.addInsnWithLabelDependency(
                     Insn::NextAwait {
                         cursor_id,
                         pc_if_next: jump_label,
@@ -1080,26 +1052,26 @@ fn close_loop(program: &mut ProgramBuilder,
         }
         SrcOperator::Search {
             id,
-            table_reference,
-            search,
+            tblRef: table_reference,
+            indexSearch: search,
             ..
         } => {
-            program.resolve_label(*metadata.next_row_labels.get(id).unwrap(), program.offset());
+            program.resolveLabel(*metadata.nextRowLabels.get(id).unwrap(), program.nextPc());
             if matches!(search, IndexSearch::RowidEq { .. }) {
                 // Rowid equality point lookups are handled with a SeekRowid instruction which does not loop, so there is no need to emit a NextAsync instruction.
                 return Ok(());
             }
             let cursor_id = match search {
-                IndexSearch::IndexSearch { index, .. } => program.resolve_cursor_id(&index.name),
+                IndexSearch::IndexSearch { index, .. } => program.resolveCursorId(&index.name),
                 IndexSearch::RowidSearch { .. } => {
-                    program.resolve_cursor_id(&table_reference.table_identifier)
+                    program.resolveCursorId(&table_reference.table_identifier)
                 }
                 IndexSearch::RowidEq { .. } => unreachable!(),
             };
 
-            program.emit_insn(Insn::NextAsync { cursor_id });
-            let jump_label = metadata.scan_loop_body_labels.pop().unwrap();
-            program.emit_insn_with_label_dependency(
+            program.addInsn0(Insn::NextAsync { cursor_id });
+            let jump_label = metadata.scanLoopBodyLabels.pop().unwrap();
+            program.addInsnWithLabelDependency(
                 Insn::NextAwait {
                     cursor_id,
                     pc_if_next: jump_label,
@@ -1127,8 +1099,8 @@ fn group_by_emit(
     referenced_tables: &[BTreeTableRef],
     metadata: &mut Metadata,
 ) -> Result<()> {
-    let sort_loop_start_label = program.allocate_label();
-    let grouping_done_label = program.allocate_label();
+    let sort_loop_start_label = program.allocateLabel();
+    let grouping_done_label = program.allocateLabel();
     let group_by_metadata = metadata.group_by_metadata.as_mut().unwrap();
 
     let GroupByMetadata {
@@ -1144,7 +1116,7 @@ fn group_by_emit(
         sorter_key_register,
         ..
     } = *group_by_metadata;
-    let halt_label = *metadata.termination_label_stack.first().unwrap();
+    let halt_label = *metadata.terminationLabelStack.first().unwrap();
 
     // all group by columns and all arguments of agg functions are in the sorter.
     // the sort keys are the group by columns (the aggregation within groups is done based on how long the sort keys remain the same)
@@ -1165,16 +1137,16 @@ fn group_by_emit(
         columns: pseudo_columns,
     });
 
-    let pseudo_cursor = program.alloc_cursor_id(None, Some(Table::Pseudo(pseudo_table.clone())));
+    let pseudo_cursor = program.allocCursorId(None, Some(Table::Pseudo(pseudo_table.clone())));
 
-    program.emit_insn(Insn::OpenPseudo {
+    program.addInsn0(Insn::OpenPseudo {
         cursor_id: pseudo_cursor,
         content_reg: sorter_key_register,
         num_fields: sorter_column_count,
     });
 
     // Sort the sorter based on the group by columns
-    program.emit_insn_with_label_dependency(
+    program.addInsnWithLabelDependency(
         Insn::SorterSort {
             cursor_id: group_by_metadata.sort_cursor,
             pc_if_empty: grouping_done_label,
@@ -1182,61 +1154,61 @@ fn group_by_emit(
         grouping_done_label,
     );
 
-    program.defer_label_resolution(sort_loop_start_label, program.offset() as usize);
+    program.defer_label_resolution(sort_loop_start_label, program.nextPc() as usize);
     // Read a row from the sorted data in the sorter into the pseudo cursor
-    program.emit_insn(Insn::SorterData {
+    program.addInsn0(Insn::SorterData {
         cursor_id: group_by_metadata.sort_cursor,
         dest_reg: group_by_metadata.sorter_key_register,
         pseudo_cursor,
     });
 
     // Read the group by columns from the pseudo cursor
-    let groups_start_reg = program.alloc_registers(group_by.exprs.len());
+    let groups_start_reg = program.allocRegisters(group_by.exprs.len());
     for i in 0..group_by.exprs.len() {
         let sorter_column_index = i;
         let group_reg = groups_start_reg + i;
-        program.emit_insn(Insn::Column {
+        program.addInsn0(Insn::Column {
             cursor_id: pseudo_cursor,
             column: sorter_column_index,
-            dest: group_reg,
+            destReg: group_reg,
         });
     }
 
     // Compare the group by columns to the previous group by columns to see if we are at a new group or not
-    program.emit_insn(Insn::Compare {
+    program.addInsn0(Insn::Compare {
         start_reg_a: comparison_register,
         start_reg_b: groups_start_reg,
         count: group_by.exprs.len(),
     });
 
-    let agg_step_label = program.allocate_label();
+    let agg_step_label = program.allocateLabel();
 
     program.add_comment(
-        program.offset(),
+        program.nextPc(),
         "start new group if comparison is not equal",
     );
     // If we are at a new group, continue. If we are at the same group, jump to the aggregation step (i.e. accumulate more values into the aggregations)
-    program.emit_insn_with_label_dependency(
+    program.addInsnWithLabelDependency(
         Insn::Jump {
-            target_pc_lt: program.offset() + 1,
+            target_pc_lt: program.nextPc() + 1,
             target_pc_eq: agg_step_label,
-            target_pc_gt: program.offset() + 1,
+            target_pc_gt: program.nextPc() + 1,
         },
         agg_step_label,
     );
 
     // New group, move current group by columns into the comparison register
-    program.emit_insn(Insn::Move {
+    program.addInsn0(Insn::Move {
         source_reg: groups_start_reg,
         dest_reg: comparison_register,
         count: group_by.exprs.len(),
     });
 
     program.add_comment(
-        program.offset(),
+        program.nextPc(),
         "check if ended group had data, and output if so",
     );
-    program.emit_insn_with_label_dependency(
+    program.addInsnWithLabelDependency(
         Insn::Gosub {
             target_pc: subroutine_accumulator_output_label,
             return_reg: subroutine_accumulator_output_return_offset_register,
@@ -1244,18 +1216,18 @@ fn group_by_emit(
         subroutine_accumulator_output_label,
     );
 
-    program.add_comment(program.offset(), "check abort flag");
-    program.emit_insn_with_label_dependency(
+    program.add_comment(program.nextPc(), "check abort flag");
+    program.addInsnWithLabelDependency(
         Insn::IfPos {
             reg: abort_flag_register,
             target_pc: halt_label,
             decrement_by: 0,
         },
-        metadata.termination_label_stack[0],
+        metadata.terminationLabelStack[0],
     );
 
-    program.add_comment(program.offset(), "goto clear accumulator subroutine");
-    program.emit_insn_with_label_dependency(
+    program.add_comment(program.nextPc(), "goto clear accumulator subroutine");
+    program.addInsnWithLabelDependency(
         Insn::Gosub {
             target_pc: subroutine_accumulator_clear_label,
             return_reg: subroutine_accumulator_clear_return_offset_register,
@@ -1264,7 +1236,7 @@ fn group_by_emit(
     );
 
     // Accumulate the values into the aggregations
-    program.resolve_label(agg_step_label, program.offset());
+    program.resolveLabel(agg_step_label, program.nextPc());
     let start_reg = metadata.aggregation_start_register.unwrap();
     let mut cursor_index = group_by.exprs.len();
     for (i, agg) in aggregates.iter().enumerate() {
@@ -1282,10 +1254,10 @@ fn group_by_emit(
 
     // We only emit the group by columns if we are going to start a new group (i.e. the prev group will not accumulate any more values into the aggregations)
     program.add_comment(
-        program.offset(),
+        program.nextPc(),
         "don't emit group columns if continuing existing group",
     );
-    program.emit_insn_with_label_dependency(
+    program.addInsnWithLabelDependency(
         Insn::If {
             target_pc: accumulator_indicator_set_true_label,
             reg: data_in_accumulator_indicator_register,
@@ -1298,21 +1270,21 @@ fn group_by_emit(
     for i in 0..group_by.exprs.len() {
         let key_reg = group_exprs_start_register + i;
         let sorter_column_index = i;
-        program.emit_insn(Insn::Column {
+        program.addInsn0(Insn::Column {
             cursor_id: pseudo_cursor,
             column: sorter_column_index,
-            dest: key_reg,
+            destReg: key_reg,
         });
     }
 
-    program.resolve_label(accumulator_indicator_set_true_label, program.offset());
-    program.add_comment(program.offset(), "indicate data in accumulator");
-    program.emit_insn(Insn::Integer {
+    program.resolveLabel(accumulator_indicator_set_true_label, program.nextPc());
+    program.add_comment(program.nextPc(), "indicate data in accumulator");
+    program.addInsn0(Insn::Integer {
         value: 1,
-        dest: data_in_accumulator_indicator_register,
+        destReg: data_in_accumulator_indicator_register,
     });
 
-    program.emit_insn_with_label_dependency(
+    program.addInsnWithLabelDependency(
         Insn::SorterNext {
             cursor_id: group_by_metadata.sort_cursor,
             pc_if_next: sort_loop_start_label,
@@ -1320,10 +1292,10 @@ fn group_by_emit(
         sort_loop_start_label,
     );
 
-    program.resolve_label(grouping_done_label, program.offset());
+    program.resolveLabel(grouping_done_label, program.nextPc());
 
-    program.add_comment(program.offset(), "emit row for final group");
-    program.emit_insn_with_label_dependency(
+    program.add_comment(program.nextPc(), "emit row for final group");
+    program.addInsnWithLabelDependency(
         Insn::Gosub {
             target_pc: group_by_metadata.subroutine_accumulator_output_label,
             return_reg: group_by_metadata.subroutine_accumulator_output_return_offset_register,
@@ -1331,31 +1303,31 @@ fn group_by_emit(
         group_by_metadata.subroutine_accumulator_output_label,
     );
 
-    program.add_comment(program.offset(), "group by finished");
+    program.add_comment(program.nextPc(), "group by finished");
     let termination_label =
-        metadata.termination_label_stack[metadata.termination_label_stack.len() - 2];
-    program.emit_insn_with_label_dependency(
+        metadata.terminationLabelStack[metadata.terminationLabelStack.len() - 2];
+    program.addInsnWithLabelDependency(
         Insn::Goto {
-            target_pc: termination_label,
+            targetPc: termination_label,
         },
         termination_label,
     );
-    program.emit_insn(Insn::Integer {
+    program.addInsn0(Insn::Integer {
         value: 1,
-        dest: group_by_metadata.abort_flag_register,
+        destReg: group_by_metadata.abort_flag_register,
     });
-    program.emit_insn(Insn::Return {
+    program.addInsn0(Insn::Return {
         return_reg: group_by_metadata.subroutine_accumulator_output_return_offset_register,
     });
 
-    program.resolve_label(
+    program.resolveLabel(
         group_by_metadata.subroutine_accumulator_output_label,
-        program.offset(),
+        program.nextPc(),
     );
 
-    program.add_comment(program.offset(), "output group by row subroutine start");
-    let termination_label = *metadata.termination_label_stack.last().unwrap();
-    program.emit_insn_with_label_dependency(
+    program.add_comment(program.nextPc(), "output group by row subroutine start");
+    let termination_label = *metadata.terminationLabelStack.last().unwrap();
+    program.addInsnWithLabelDependency(
         Insn::IfPos {
             reg: group_by_metadata.data_in_accumulator_indicator_register,
             target_pc: termination_label,
@@ -1363,23 +1335,23 @@ fn group_by_emit(
         },
         termination_label,
     );
-    let group_by_end_without_emitting_row_label = program.allocate_label();
+    let group_by_end_without_emitting_row_label = program.allocateLabel();
     program.defer_label_resolution(
         group_by_end_without_emitting_row_label,
-        program.offset() as usize,
+        program.nextPc() as usize,
     );
-    program.emit_insn(Insn::Return {
+    program.addInsn0(Insn::Return {
         return_reg: group_by_metadata.subroutine_accumulator_output_return_offset_register,
     });
 
     let agg_start_reg = metadata.aggregation_start_register.unwrap();
-    program.resolve_label(
-        metadata.termination_label_stack.pop().unwrap(),
-        program.offset(),
+    program.resolveLabel(
+        metadata.terminationLabelStack.pop().unwrap(),
+        program.nextPc(),
     );
     for (i, agg) in aggregates.iter().enumerate() {
         let agg_result_reg = agg_start_reg + i;
-        program.emit_insn(Insn::AggFinal {
+        program.addInsn0(Insn::AggFinal {
             register: agg_result_reg,
             func: agg.func.clone(),
         });
@@ -1421,7 +1393,7 @@ fn group_by_emit(
                 referenced_tables,
                 result_columns,
                 Some(&precomputed_exprs_to_register),
-                limit.map(|l| (l, *metadata.termination_label_stack.last().unwrap())),
+                limit.map(|l| (l, *metadata.terminationLabelStack.last().unwrap())),
             )?;
         }
         Some(order_by) => {
@@ -1437,26 +1409,26 @@ fn group_by_emit(
         }
     }
 
-    program.emit_insn(Insn::Return {
+    program.addInsn0(Insn::Return {
         return_reg: group_by_metadata.subroutine_accumulator_output_return_offset_register,
     });
 
-    program.add_comment(program.offset(), "clear accumulator subroutine start");
-    program.resolve_label(
+    program.add_comment(program.nextPc(), "clear accumulator subroutine start");
+    program.resolveLabel(
         group_by_metadata.subroutine_accumulator_clear_label,
-        program.offset(),
+        program.nextPc(),
     );
     let start_reg = group_by_metadata.group_exprs_accumulator_register;
-    program.emit_insn(Insn::Null {
+    program.addInsn0(Insn::Null {
         dest: start_reg,
         dest_end: Some(start_reg + group_by.exprs.len() + aggregates.len() - 1),
     });
 
-    program.emit_insn(Insn::Integer {
+    program.addInsn0(Insn::Integer {
         value: 0,
-        dest: group_by_metadata.data_in_accumulator_indicator_register,
+        destReg: group_by_metadata.data_in_accumulator_indicator_register,
     });
-    program.emit_insn(Insn::Return {
+    program.addInsn0(Insn::Return {
         return_reg: group_by_metadata.subroutine_accumulator_clear_return_offset_register,
     });
 
@@ -1476,7 +1448,7 @@ fn agg_without_group_by_emit(
     let agg_start_reg = metadata.aggregation_start_register.unwrap();
     for (i, agg) in aggregates.iter().enumerate() {
         let agg_result_reg = agg_start_reg + i;
-        program.emit_insn(Insn::AggFinal {
+        program.addInsn0(Insn::AggFinal {
             register: agg_result_reg,
             func: agg.func.clone(),
         });
@@ -1512,11 +1484,11 @@ fn order_by_emit(
     limit: Option<usize>,
     metadata: &mut Metadata,
 ) -> Result<()> {
-    let sort_loop_start_label = program.allocate_label();
-    let sort_loop_end_label = program.allocate_label();
-    program.resolve_label(
-        metadata.termination_label_stack.pop().unwrap(),
-        program.offset(),
+    let sort_loop_start_label = program.allocateLabel();
+    let sort_loop_end_label = program.allocateLabel();
+    program.resolveLabel(
+        metadata.terminationLabelStack.pop().unwrap(),
+        program.nextPc(),
     );
     let mut pseudo_columns = vec![];
     for (i, _) in order_by.iter().enumerate() {
@@ -1550,7 +1522,7 @@ fn order_by_emit(
         .map(|v| v.len())
         .unwrap_or(0);
 
-    let pseudo_cursor = program.alloc_cursor_id(
+    let pseudo_cursor = program.allocCursorId(
         None,
         Some(Table::Pseudo(Rc::new(PseudoTable {
             columns: pseudo_columns,
@@ -1558,13 +1530,13 @@ fn order_by_emit(
     );
     let sort_metadata = metadata.sort_metadata.as_mut().unwrap();
 
-    program.emit_insn(Insn::OpenPseudo {
+    program.addInsn0(Insn::OpenPseudo {
         cursor_id: pseudo_cursor,
         content_reg: sort_metadata.sorter_data_register,
         num_fields: num_columns_in_sorter,
     });
 
-    program.emit_insn_with_label_dependency(
+    program.addInsnWithLabelDependency(
         Insn::SorterSort {
             cursor_id: sort_metadata.sort_cursor,
             pc_if_empty: sort_loop_end_label,
@@ -1572,8 +1544,8 @@ fn order_by_emit(
         sort_loop_end_label,
     );
 
-    program.defer_label_resolution(sort_loop_start_label, program.offset() as usize);
-    program.emit_insn(Insn::SorterData {
+    program.defer_label_resolution(sort_loop_start_label, program.nextPc() as usize);
+    program.addInsn0(Insn::SorterData {
         cursor_id: sort_metadata.sort_cursor,
         dest_reg: sort_metadata.sorter_data_register,
         pseudo_cursor,
@@ -1582,13 +1554,13 @@ fn order_by_emit(
     // We emit the columns in SELECT order, not sorter order (sorter always has the sort keys first).
     // This is tracked in m.result_column_indexes_in_orderby_sorter.
     let cursor_id = pseudo_cursor;
-    let start_reg = program.alloc_registers(result_columns.len());
+    let start_reg = program.allocRegisters(result_columns.len());
     for i in 0..result_columns.len() {
         let reg = start_reg + i;
-        program.emit_insn(Insn::Column {
+        program.addInsn0(Insn::Column {
             cursor_id,
             column: metadata.result_column_indexes_in_orderby_sorter[&i],
-            dest: reg,
+            destReg: reg,
         });
     }
     emit_result_row_and_limit(
@@ -1598,7 +1570,7 @@ fn order_by_emit(
         limit.map(|l| (l, sort_loop_end_label)),
     )?;
 
-    program.emit_insn_with_label_dependency(
+    program.addInsnWithLabelDependency(
         Insn::SorterNext {
             cursor_id: sort_metadata.sort_cursor,
             pc_if_next: sort_loop_start_label,
@@ -1606,7 +1578,7 @@ fn order_by_emit(
         sort_loop_start_label,
     );
 
-    program.resolve_label(sort_loop_end_label, program.offset());
+    program.resolveLabel(sort_loop_end_label, program.nextPc());
 
     Ok(())
 }
@@ -1618,18 +1590,18 @@ fn emit_result_row_and_limit(
     result_columns_len: usize,
     limit: Option<(usize, BranchOffset)>,
 ) -> Result<()> {
-    program.emit_insn(Insn::ResultRow {
+    program.addInsn0(Insn::ResultRow {
         start_reg,
         count: result_columns_len,
     });
     if let Some((limit, jump_label_on_limit_reached)) = limit {
-        let limit_reg = program.alloc_register();
-        program.emit_insn(Insn::Integer {
+        let limit_reg = program.allocRegister();
+        program.addInsn0(Insn::Integer {
             value: limit as i64,
-            dest: limit_reg,
+            destReg: limit_reg,
         });
         program.mark_last_insn_constant();
-        program.emit_insn_with_label_dependency(
+        program.addInsnWithLabelDependency(
             Insn::DecrJumpZero {
                 reg: limit_reg,
                 target_pc: jump_label_on_limit_reached,
@@ -1648,10 +1620,10 @@ fn emit_select_result(
     precomputed_exprs_to_register: Option<&Vec<(&ast::Expr, usize)>>,
     limit: Option<(usize, BranchOffset)>,
 ) -> Result<()> {
-    let start_reg = program.alloc_registers(result_columns.len());
+    let start_reg = program.allocRegisters(result_columns.len());
     for (i, rc) in result_columns.iter().enumerate() {
         let reg = start_reg + i;
-        translate_expr(
+        expr::translateExpr(
             program,
             Some(referenced_tables),
             &rc.expr,
@@ -1672,12 +1644,12 @@ fn sorter_insert(
     cursor_id: usize,
     record_reg: usize,
 ) {
-    program.emit_insn(Insn::MakeRecord {
-        start_reg,
+    program.addInsn0(Insn::MakeRecord {
+        startReg: start_reg,
         count: column_count,
-        dest_reg: record_reg,
+        destReg: record_reg,
     });
-    program.emit_insn(Insn::SorterInsert {
+    program.addInsn0(Insn::SorterInsert {
         cursor_id,
         record_reg,
     });
@@ -1704,10 +1676,10 @@ fn order_by_sorter_insert(
     // The ORDER BY sorter has the sort keys first, then the result columns.
     let orderby_sorter_column_count =
         order_by_len + result_columns.len() - result_columns_to_skip_len;
-    let start_reg = program.alloc_registers(orderby_sorter_column_count);
+    let start_reg = program.allocRegisters(orderby_sorter_column_count);
     for (i, (expr, _)) in order_by.iter().enumerate() {
         let key_reg = start_reg + i;
-        translate_expr(
+        expr::translateExpr(
             program,
             Some(referenced_tables),
             expr,
@@ -1726,7 +1698,7 @@ fn order_by_sorter_insert(
                 continue;
             }
         }
-        translate_expr(
+        expr::translateExpr(
             program,
             Some(referenced_tables),
             &rc.expr,

@@ -56,10 +56,18 @@ impl Cursor for Sorter {
         self.next()
     }
 
+    fn last(&mut self) -> Result<CursorResult<()>> {
+        todo!()
+    }
+
     fn next(&mut self) -> Result<CursorResult<()>> {
         let mut c = self.current.borrow_mut();
         *c = self.records.pop();
         Ok(CursorResult::Ok(()))
+    }
+
+    fn prev(&mut self) -> Result<CursorResult<()>> {
+        todo!()
     }
 
     fn wait_for_completion(&mut self) -> Result<()> {
@@ -96,6 +104,11 @@ impl Cursor for Sorter {
         Ok(CursorResult::Ok(()))
     }
 
+    fn exists(&mut self, key: &OwnedValue) -> Result<CursorResult<bool>> {
+        let _ = key;
+        todo!()
+    }
+
     fn set_null_flag(&mut self, _flag: bool) {
         todo!();
     }
@@ -104,20 +117,7 @@ impl Cursor for Sorter {
         false
     }
 
-    fn exists(&mut self, key: &OwnedValue) -> Result<CursorResult<bool>> {
-        let _ = key;
-        todo!()
-    }
-
     fn btree_create(&mut self, _flags: usize) -> u32 {
         unreachable!("Why did you try to build a new tree with a sorter??? Stand up, open the door and take a walk for 30 min to come back with a better plan.");
-    }
-
-    fn last(&mut self) -> Result<CursorResult<()>> {
-        todo!()
-    }
-
-    fn prev(&mut self) -> Result<CursorResult<()>> {
-        todo!()
     }
 }

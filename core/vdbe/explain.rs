@@ -89,9 +89,7 @@ pub fn insn_to_str(
                 dest_end.map_or(0, |end| end as i32),
                 OwnedValue::Text(Rc::new("".to_string())),
                 0,
-                dest_end.map_or(format!("r[{}]=NULL", dest), |end| {
-                    format!("r[{}..{}]=NULL", dest, end)
-                }),
+                dest_end.map_or(format!("r[{}]=NULL", dest), |end| { format!("r[{}..{}]=NULL", dest, end) }),
             ),
             Insn::NullRow { cursor_id } => (
                 "NullRow",
@@ -283,8 +281,8 @@ pub fn insn_to_str(
                 format!("if !r[{}] goto {}", reg, target_pc),
             ),
             Insn::OpenReadAsync {
-                cursor_id,
-                root_page,
+                cursorId: cursor_id,
+                rootPage: root_page,
             } => (
                 "OpenReadAsync",
                 *cursor_id as i32,
@@ -353,7 +351,7 @@ pub fn insn_to_str(
             Insn::Column {
                 cursor_id,
                 column,
-                dest,
+                destReg: dest,
             } => {
                 let (table_identifier, table) = &program.cursor_ref[*cursor_id];
                 (
@@ -377,9 +375,9 @@ pub fn insn_to_str(
                 )
             }
             Insn::MakeRecord {
-                start_reg,
+                startReg: start_reg,
                 count,
-                dest_reg,
+                destReg: dest_reg,
             } => (
                 "MakeRecord",
                 *start_reg as i32,
@@ -449,7 +447,7 @@ pub fn insn_to_str(
                 0,
                 "".to_string(),
             ),
-            Insn::Goto { target_pc } => (
+            Insn::Goto { targetPc: target_pc } => (
                 "Goto",
                 0,
                 *target_pc as i32,
@@ -479,7 +477,7 @@ pub fn insn_to_str(
                 0,
                 "".to_string(),
             ),
-            Insn::Integer { value, dest } => (
+            Insn::Integer { value, destReg: dest } => (
                 "Integer",
                 *value as i32,
                 *dest as i32,
@@ -547,7 +545,7 @@ pub fn insn_to_str(
             ),
             Insn::SeekRowid {
                 cursor_id,
-                src_reg,
+                srcReg: src_reg,
                 target_pc,
             } => (
                 "SeekRowid",
@@ -556,15 +554,7 @@ pub fn insn_to_str(
                 *target_pc as i32,
                 OwnedValue::Text(Rc::new("".to_string())),
                 0,
-                format!(
-                    "if (r[{}]!={}.rowid) goto {}",
-                    src_reg,
-                    &program.cursor_ref[*cursor_id]
-                        .0
-                        .as_ref()
-                        .unwrap_or(&format!("cursor {}", cursor_id)),
-                    target_pc
-                ),
+                format!("if (r[{}]!={}.rowid) goto {}", src_reg, &program.cursor_ref[*cursor_id].0.as_ref().unwrap_or(&format!("cursor {}", cursor_id)), target_pc),
             ),
             Insn::DeferredSeek {
                 index_cursor_id,
@@ -777,7 +767,7 @@ pub fn insn_to_str(
                 },
             ),
             Insn::InitCoroutine {
-                yield_reg,
+                yieldReg: yield_reg,
                 jump_on_definition,
                 start_offset,
             } => (
@@ -789,7 +779,7 @@ pub fn insn_to_str(
                 0,
                 "".to_string(),
             ),
-            Insn::EndCoroutine { yield_reg } => (
+            Insn::EndCoroutine { yieldReg: yield_reg } => (
                 "EndCoroutine",
                 *yield_reg as i32,
                 0,
@@ -799,7 +789,7 @@ pub fn insn_to_str(
                 "".to_string(),
             ),
             Insn::Yield {
-                yield_reg,
+                yieldReg: yield_reg,
                 end_offset,
             } => (
                 "Yield",
@@ -811,9 +801,9 @@ pub fn insn_to_str(
                 "".to_string(),
             ),
             Insn::InsertAsync {
-                cursor,
-                key_reg,
-                record_reg,
+                cursorId: cursor,
+                keyReg: key_reg,
+                recReg: record_reg,
                 flag,
             } => (
                 "InsertAsync",
@@ -834,7 +824,7 @@ pub fn insn_to_str(
                 "".to_string(),
             ),
             Insn::NewRowid {
-                cursor,
+                cursorId: cursor,
                 rowid_reg,
                 prev_largest_reg,
             } => (
@@ -878,8 +868,8 @@ pub fn insn_to_str(
                 "".to_string(),
             ),
             Insn::OpenWriteAsync {
-                cursor_id,
-                root_page,
+                cursorId: cursor_id,
+                rootPage: root_page,
             } => (
                 "OpenWriteAsync",
                 *cursor_id as i32,
@@ -984,6 +974,7 @@ pub fn insn_to_str(
                 "".to_string(),
             ),
         };
+
     format!(
         "{:<4}  {:<17}  {:<4}  {:<4}  {:<4}  {:<13}  {:<2}  {}",
         addr,

@@ -146,8 +146,7 @@ impl File for MemoryFile {
 
             {
                 let mut page = self.io.get_or_allocate_page(page_no);
-                page[page_offset..page_offset + bytes_to_write]
-                    .copy_from_slice(&data[buf_offset..buf_offset + bytes_to_write]);
+                page[page_offset..page_offset + bytes_to_write].copy_from_slice(&data[buf_offset..buf_offset + bytes_to_write]);
             }
 
             offset += bytes_to_write;
