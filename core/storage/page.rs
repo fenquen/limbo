@@ -212,9 +212,6 @@ impl Pager {
 
         let pageCacheKey = PageCacheKey::new(pageId, Some(self.wal.borrow().getMaxFrameId()));
 
-        if let Some(page) = pageCache.get(&pageCacheKey) {
-            return Ok(page.clone());
-        }
 
         let page = Arc::new(Page::new(pageId));
 
@@ -230,6 +227,11 @@ impl Pager {
             pageCache.insert(pageCacheKey, page.clone());
 
             return Ok(page);
+        }
+
+        if let Some(page) = pageCache.get(&pageCacheKey) {
+            page.clear_locked();
+            return Ok(page.clone());
         }
 
         sqlite3_ondisk::beginReadPage(self.storage.clone(),

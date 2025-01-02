@@ -397,7 +397,7 @@ impl WalFile {
                 current_page: 0,
             },
             syncing: Rc::new(RefCell::new(false)),
-            checkpoint_threshold: 1000,
+            checkpoint_threshold: 1,
             page_size,
             max_frame: 0,
             min_frame: 0,
