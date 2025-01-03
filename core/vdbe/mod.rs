@@ -245,8 +245,7 @@ pub enum Insn {
         column: usize,
         destReg: usize,
     },
-
-    // Make a record and write it to destination register.
+    /// Make a record and write it to destination register.
     MakeRecord {
         startReg: usize, // P1
         count: usize,     // P2
@@ -546,7 +545,7 @@ impl RegexCache {
 /// The program state describes the environment in which the program executes.
 pub struct ProgramState {
     pub pc: BranchOffset,
-    cursors: RefCell<BTreeMap<CursorID, Box<dyn Cursor>>>,
+    cursorId2Cursor: RefCell<BTreeMap<CursorID, Box<dyn Cursor>>>,
     registers: Vec<OwnedValue>,
     last_compare: Option<std::cmp::Ordering>,
     deferred_seek: Option<(CursorID, CursorID)>,
@@ -561,7 +560,7 @@ impl ProgramState {
         registers.resize(max_registers, OwnedValue::Null);
         Self {
             pc: 0,
-            cursors,
+            cursorId2Cursor: cursors,
             registers,
             last_compare: None,
             deferred_seek: None,
@@ -614,7 +613,7 @@ impl Program {
             let insn = &self.insns[programState.pc as usize];
 
             trace_insn(self, programState.pc as InsnReference, insn);
-            let mut cursors = programState.cursors.borrow_mut();
+            let mut cursorId2Cursor = programState.cursorId2Cursor.borrow_mut();
             match insn {
                 Insn::Init { target_pc } => {
                     assert!(*target_pc >= 0);
@@ -1189,7 +1188,7 @@ impl Program {
                     programState.pc += 1;
                 }
                 Insn::NullRow { cursor_id } => {
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     cursor.set_null_flag(true);
                     programState.pc += 1;
                 }
@@ -1457,7 +1456,7 @@ impl Program {
                         *root_page,
                         self.database_header.clone(),
                     ));
-                    cursors.insert(*cursor_id, cursor);
+                    cursorId2Cursor.insert(*cursor_id, cursor);
                     programState.pc += 1;
                 }
                 Insn::OpenReadAwait => programState.pc += 1,
@@ -1467,16 +1466,16 @@ impl Program {
                     num_fields: _,
                 } => {
                     let cursor = Box::new(PseudoCursor::new());
-                    cursors.insert(*cursor_id, cursor);
+                    cursorId2Cursor.insert(*cursor_id, cursor);
                     programState.pc += 1;
                 }
                 Insn::RewindAsync { cursor_id } => {
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     return_if_io!(cursor.rewind());
                     programState.pc += 1;
                 }
                 Insn::LastAsync { cursor_id } => {
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     return_if_io!(cursor.last());
                     programState.pc += 1;
                 }
@@ -1484,7 +1483,7 @@ impl Program {
                     cursor_id,
                     pc_if_empty,
                 } => {
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     cursor.wait_for_completion()?;
                     if cursor.is_empty() {
                         programState.pc = *pc_if_empty;
@@ -1496,7 +1495,7 @@ impl Program {
                     cursor_id,
                     pc_if_empty,
                 } => {
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     cursor.wait_for_completion()?;
                     if cursor.is_empty() {
                         programState.pc = *pc_if_empty;
@@ -1510,9 +1509,9 @@ impl Program {
                     destReg: dest,
                 } => {
                     if let Some((index_cursor_id, table_cursor_id)) = programState.deferred_seek.take() {
-                        let index_cursor = cursors.get_mut(&index_cursor_id).unwrap();
+                        let index_cursor = cursorId2Cursor.get_mut(&index_cursor_id).unwrap();
                         let rowid = index_cursor.rowid()?;
-                        let table_cursor = cursors.get_mut(&table_cursor_id).unwrap();
+                        let table_cursor = cursorId2Cursor.get_mut(&table_cursor_id).unwrap();
                         match table_cursor.seek(SeekKey::TableRowId(rowid.unwrap()), SeekOp::EQ)? {
                             CursorResult::Ok(_) => {}
                             CursorResult::IO => {
@@ -1522,7 +1521,7 @@ impl Program {
                         }
                     }
 
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     if let Some(ref record) = *cursor.record()? {
                         let null_flag = cursor.get_null_flag();
                         programState.registers[*dest] = if null_flag {
@@ -1546,13 +1545,13 @@ impl Program {
                     return Ok(StepResult::Row(record));
                 }
                 Insn::NextAsync { cursor_id } => {
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     cursor.set_null_flag(false);
                     return_if_io!(cursor.next());
                     programState.pc += 1;
                 }
                 Insn::PrevAsync { cursor_id } => {
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     cursor.set_null_flag(false);
                     return_if_io!(cursor.prev());
                     programState.pc += 1;
@@ -1562,7 +1561,7 @@ impl Program {
                     pc_if_next,
                 } => {
                     assert!(*pc_if_next >= 0);
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     cursor.wait_for_completion()?;
                     if !cursor.is_empty() {
                         programState.pc = *pc_if_next;
@@ -1575,7 +1574,7 @@ impl Program {
                     pc_if_next,
                 } => {
                     assert!(*pc_if_next >= 0);
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     cursor.wait_for_completion()?;
                     if !cursor.is_empty() {
                         programState.pc = *pc_if_next;
@@ -1687,9 +1686,9 @@ impl Program {
                 }
                 Insn::RowId { cursor_id, dest } => {
                     if let Some((index_cursor_id, table_cursor_id)) = programState.deferred_seek.take() {
-                        let index_cursor = cursors.get_mut(&index_cursor_id).unwrap();
+                        let index_cursor = cursorId2Cursor.get_mut(&index_cursor_id).unwrap();
                         let rowid = index_cursor.rowid()?;
-                        let table_cursor = cursors.get_mut(&table_cursor_id).unwrap();
+                        let table_cursor = cursorId2Cursor.get_mut(&table_cursor_id).unwrap();
                         match table_cursor.seek(SeekKey::TableRowId(rowid.unwrap()), SeekOp::EQ)? {
                             CursorResult::Ok(_) => {}
                             CursorResult::IO => {
@@ -1699,7 +1698,7 @@ impl Program {
                         }
                     }
 
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     if let Some(ref rowid) = cursor.rowid()? {
                         programState.registers[*dest] = OwnedValue::Integer(*rowid as i64);
                     } else {
@@ -1708,7 +1707,7 @@ impl Program {
                     programState.pc += 1;
                 }
                 Insn::SeekRowid { cursor_id, srcReg, target_pc, } => {
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     let rowid = match &programState.registers[*srcReg] {
                         OwnedValue::Integer(rowid) => *rowid as u64,
                         OwnedValue::Null => {
@@ -1739,7 +1738,7 @@ impl Program {
                     is_index,
                 } => {
                     if *is_index {
-                        let cursor = cursors.get_mut(cursor_id).unwrap();
+                        let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                         let record_from_regs: OwnedRecord =
                             make_owned_record(&programState.registers, start_reg, num_regs);
                         let found = return_if_io!(
@@ -1751,7 +1750,7 @@ impl Program {
                             programState.pc += 1;
                         }
                     } else {
-                        let cursor = cursors.get_mut(cursor_id).unwrap();
+                        let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                         let rowid = match &programState.registers[*start_reg] {
                             OwnedValue::Null => {
                                 // All integer values are greater than null so we just rewind the cursor
@@ -1783,7 +1782,7 @@ impl Program {
                     is_index,
                 } => {
                     if *is_index {
-                        let cursor = cursors.get_mut(cursor_id).unwrap();
+                        let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                         let record_from_regs: OwnedRecord =
                             make_owned_record(&programState.registers, start_reg, num_regs);
                         let found = return_if_io!(
@@ -1795,7 +1794,7 @@ impl Program {
                             programState.pc += 1;
                         }
                     } else {
-                        let cursor = cursors.get_mut(cursor_id).unwrap();
+                        let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                         let rowid = match &programState.registers[*start_reg] {
                             OwnedValue::Null => {
                                 // All integer values are greater than null so we just rewind the cursor
@@ -1826,7 +1825,7 @@ impl Program {
                     target_pc,
                 } => {
                     assert!(*target_pc >= 0);
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     let record_from_regs: OwnedRecord =
                         make_owned_record(&programState.registers, start_reg, num_regs);
                     if let Some(ref idx_record) = *cursor.record()? {
@@ -1848,7 +1847,7 @@ impl Program {
                     num_regs,
                     target_pc,
                 } => {
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     let record_from_regs: OwnedRecord =
                         make_owned_record(&programState.registers, start_reg, num_regs);
                     if let Some(ref idx_record) = *cursor.record()? {
@@ -2131,7 +2130,7 @@ impl Program {
                         })
                         .collect();
                     let cursor = Box::new(sorter::Sorter::new(order));
-                    cursors.insert(*cursor_id, cursor);
+                    cursorId2Cursor.insert(*cursor_id, cursor);
                     programState.pc += 1;
                 }
                 Insn::SorterData {
@@ -2139,7 +2138,7 @@ impl Program {
                     dest_reg,
                     pseudo_cursor: sorter_cursor,
                 } => {
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     let record = match *cursor.record()? {
                         Some(ref record) => record.clone(),
                         None => {
@@ -2148,7 +2147,7 @@ impl Program {
                         }
                     };
                     programState.registers[*dest_reg] = OwnedValue::Record(record.clone());
-                    let sorter_cursor = cursors.get_mut(sorter_cursor).unwrap();
+                    let sorter_cursor = cursorId2Cursor.get_mut(sorter_cursor).unwrap();
                     sorter_cursor.insert(&OwnedValue::Integer(0), &record, false)?; // fix key later
                     programState.pc += 1;
                 }
@@ -2156,7 +2155,7 @@ impl Program {
                     cursor_id,
                     record_reg,
                 } => {
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     let record = match &programState.registers[*record_reg] {
                         OwnedValue::Record(record) => record,
                         _ => unreachable!("SorterInsert on non-record register"),
@@ -2169,7 +2168,7 @@ impl Program {
                     cursor_id,
                     pc_if_empty,
                 } => {
-                    if let Some(cursor) = cursors.get_mut(cursor_id) {
+                    if let Some(cursor) = cursorId2Cursor.get_mut(cursor_id) {
                         cursor.rewind()?;
                         programState.pc += 1;
                     } else {
@@ -2181,7 +2180,7 @@ impl Program {
                     pc_if_next,
                 } => {
                     assert!(*pc_if_next >= 0);
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     return_if_io!(cursor.next());
                     if !cursor.is_empty() {
                         programState.pc = *pc_if_next;
@@ -2524,19 +2523,20 @@ impl Program {
                     }
                 }
                 Insn::InsertAsync { cursorId, keyReg, recReg, .. } => {
-                    let cursor = cursors.get_mut(cursorId).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursorId).unwrap();
 
-                    let rec = match &programState.registers[*recReg] {
-                        OwnedValue::Record(rec) => rec,
-                        _ => unreachable!("Not a record! Cannot insert a non record value."),
-                    };
+                    let rec =
+                        match &programState.registers[*recReg] {
+                            OwnedValue::Record(rec) => rec,
+                            _ => unreachable!("Not a record! Cannot insert a non record value."),
+                        };
 
                     return_if_io!(cursor.insert(&programState.registers[*keyReg], rec, true));
 
                     programState.pc += 1;
                 }
                 Insn::InsertAwait { cursor_id } => {
-                    let cursor = cursors.get_mut(cursor_id).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     cursor.wait_for_completion()?;
 
                     // Only update last_insert_rowid for regular table inserts, not schema modifications
@@ -2549,10 +2549,8 @@ impl Program {
                     }
                     programState.pc += 1;
                 }
-                Insn::NewRowid {
-                    cursorId: cursor, rowid_reg, ..
-                } => {
-                    let cursor = cursors.get_mut(cursor).unwrap();
+                Insn::NewRowid { cursorId: cursor, rowid_reg, .. } => {
+                    let cursor = cursorId2Cursor.get_mut(cursor).unwrap();
                     // TODO: make io handle rng
                     let rowid = return_if_io!(get_new_rowid(cursor, thread_rng()));
                     programState.registers[*rowid_reg] = OwnedValue::Integer(rowid);
@@ -2578,7 +2576,7 @@ impl Program {
                     rowid_reg,
                     target_pc,
                 } => {
-                    let cursor = cursors.get_mut(cursor).unwrap();
+                    let cursor = cursorId2Cursor.get_mut(cursor).unwrap();
                     let exists = return_if_io!(cursor.exists(&programState.registers[*rowid_reg]));
                     if exists {
                         programState.pc += 1;
@@ -2598,7 +2596,7 @@ impl Program {
                         *root_page,
                         self.database_header.clone(),
                     ));
-                    cursors.insert(*cursor_id, cursor);
+                    cursorId2Cursor.insert(*cursor_id, cursor);
                     programState.pc += 1;
                 }
                 Insn::OpenWriteAwait {} => programState.pc += 1,
@@ -2628,7 +2626,7 @@ impl Program {
                     programState.pc += 1;
                 }
                 Insn::Close { cursor_id } => {
-                    cursors.remove(cursor_id);
+                    cursorId2Cursor.remove(cursor_id);
                     programState.pc += 1;
                 }
                 Insn::IsNull { src, target_pc } => {
