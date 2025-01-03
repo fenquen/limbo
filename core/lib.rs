@@ -313,7 +313,7 @@ impl Conn {
         Ok(())
     }
 
-    pub fn cacheflush(&self) -> Result<CheckpointStatus> {
+    pub fn flushCache(&self) -> Result<CheckpointStatus> {
         self.pager.flushCache()
     }
 

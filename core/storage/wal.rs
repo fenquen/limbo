@@ -183,22 +183,15 @@ impl Wal for WalFile {
     }
 
     /// Write a frame to the WAL.
-    fn appendFrame(
-        &mut self,
-        page: PageArc,
-        db_size: u32,
-        write_counter: Rc<RefCell<usize>>,
-    ) -> Result<()> {
+    fn appendFrame(&mut self,
+                   page: PageArc,
+                   db_size: u32,
+                   write_counter: Rc<RefCell<usize>>) -> Result<()> {
         let page_id = page.getMutInner().pageId;
         let mut shared = self.walFileShared.write().unwrap();
         let frame_id = shared.maxFrame;
         let offset = self.frame_offset(frame_id);
-        trace!(
-            "append_frame(frame={}, offset={}, page_id={})",
-            frame_id,
-            offset,
-            page_id
-        );
+
         let header = shared.walHeader.clone();
         let header = header.read().unwrap();
         let checksums = shared.lastChecksum;
@@ -232,11 +225,7 @@ impl Wal for WalFile {
         frame_id >= self.checkpoint_threshold
     }
 
-    fn checkpoint(
-        &mut self,
-        pager: &Pager,
-        write_counter: Rc<RefCell<usize>>,
-    ) -> Result<CheckpointStatus> {
+    fn checkpoint(&mut self, pager: &Pager, write_counter: Rc<RefCell<usize>>) -> Result<CheckpointStatus> {
         'checkpoint_loop: loop {
             let state = self.ongoing_checkpoint.state;
             log::debug!("checkpoint(state={:?})", state);

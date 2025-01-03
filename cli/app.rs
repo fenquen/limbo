@@ -560,7 +560,7 @@ impl LimboCliApp {
         }
 
         // for now let's cache flush always
-        self.conn.cacheflush()?;
+        self.conn.flushCache()?;
 
         Ok(())
     }

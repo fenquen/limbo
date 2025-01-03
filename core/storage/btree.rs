@@ -2,7 +2,7 @@ use log::debug;
 
 use crate::storage::page::Pager;
 use crate::storage::sqlite3_ondisk::{
-    read_btree_cell, read_varint, write_varint, BTreeCell, DbHeader, PageContent, PageType,
+    readBtreeCell, readVarInt, write_varint, BTreeCell, DbHeader, PageContent, PageType,
     TableInteriorCell, TableLeafCell,
 };
 use crate::types::{Cursor, CursorResult, OwnedRecord, OwnedValue, SeekKey, SeekOp};
@@ -11,7 +11,7 @@ use crate::Result;
 use std::cell::{Ref, RefCell};
 use std::pin::Pin;
 use std::rc::Rc;
-
+use crate::storage::sqlite3_ondisk;
 use super::page::PageArc;
 use super::sqlite3_ondisk::{
     write_varint_to_vec, IndexInteriorCell, IndexLeafCell, OverflowCell, DATABASE_HEADER_SIZE,
@@ -211,14 +211,14 @@ impl BTreeCursor {
                 cell_idx,
                 self.pager.clone(),
                 self.max_local(contents.getPageType()),
-                self.min_local(contents.getPageType()),
+                self.min_local(),
                 self.pageUsableSpace(),
             )?;
 
             match cell {
                 BTreeCell::TableInteriorCell(TableInteriorCell {
-                                                 _left_child_page,
-                                                 _rowid,
+                                                 leftChildPageIndex: _left_child_page,
+                                                 rowId: _rowid,
                                              }) => {
                     let mem_page = self.pager.readPage(_left_child_page as usize)?;
                     self.pageStack.push(mem_page);
@@ -299,13 +299,13 @@ impl BTreeCursor {
                 cell_idx,
                 self.pager.clone(),
                 self.max_local(contents.getPageType()),
-                self.min_local(contents.getPageType()),
+                self.min_local(),
                 self.pageUsableSpace(),
             )?;
             match &cell {
                 BTreeCell::TableInteriorCell(TableInteriorCell {
-                                                 _left_child_page,
-                                                 _rowid,
+                                                 leftChildPageIndex: _left_child_page,
+                                                 rowId: _rowid,
                                              }) => {
                     assert!(predicate.is_none());
                     self.pageStack.advance();
@@ -416,7 +416,7 @@ impl BTreeCursor {
                     cell_idx,
                     self.pager.clone(),
                     self.max_local(contents.getPageType()),
-                    self.min_local(contents.getPageType()),
+                    self.min_local(),
                     self.pageUsableSpace(),
                 )?;
                 match &cell {
@@ -560,28 +560,30 @@ impl BTreeCursor {
 
             let mut foundCell = false;
 
+            'a:
             for cellIndex in 0..pageContent.cellCount() {
                 match &pageContent.getCell(cellIndex,
                                            self.pager.clone(),
                                            self.max_local(pageContent.getPageType()),
-                                           self.min_local(pageContent.getPageType()),
+                                           self.min_local(),
                                            self.pageUsableSpace())? {
-                    BTreeCell::TableInteriorCell(TableInteriorCell { _left_child_page, _rowid }) => {
-                        let SeekKey::TableRowId(rowid_key) = seekKey else {
+                    BTreeCell::TableInteriorCell(TableInteriorCell { leftChildPageIndex, rowId }) => {
+                        let SeekKey::TableRowId(rowId2Seek) = seekKey else {
                             unreachable!("table seek key should be a rowid");
                         };
 
-                        let target_leaf_page_is_in_left_subtree = match seekOp {
-                            SeekOp::GT => rowid_key < *_rowid,
-                            SeekOp::GE => rowid_key <= *_rowid,
-                            SeekOp::EQ => rowid_key <= *_rowid,
+                        let targetLeafPageInLeftSubTree = match seekOp {
+                            SeekOp::GT => rowId2Seek < *rowId,
+                            SeekOp::GE | SeekOp::EQ => rowId2Seek <= *rowId,
                         };
+
                         self.pageStack.advance();
-                        if target_leaf_page_is_in_left_subtree {
-                            let mem_page = self.pager.readPage(*_left_child_page as usize)?;
-                            self.pageStack.push(mem_page);
+
+                        if targetLeafPageInLeftSubTree {
+                            let page = self.pager.readPage(*leftChildPageIndex as usize)?;
+                            self.pageStack.push(page);
                             foundCell = true;
-                            break;
+                            break 'a;
                         }
                     }
                     BTreeCell::TableLeafCell(TableLeafCell { .. }) => unreachable!("we don't iterate leaf cells while trying to move to a leaf cell"),
@@ -590,7 +592,7 @@ impl BTreeCursor {
                             unreachable!("index seek key should be a record");
                         };
 
-                        let record = crate::storage::sqlite3_ondisk::read_record(payload)?;
+                        let record = sqlite3_ondisk::read_record(payload)?;
                         let target_leaf_page_is_in_the_left_subtree = match seekOp {
                             SeekOp::GT => index_key < &record,
                             SeekOp::GE => index_key <= &record,
@@ -602,7 +604,7 @@ impl BTreeCursor {
                             let mem_page = self.pager.readPage(*left_child_page as usize).unwrap();
                             self.pageStack.push(mem_page);
                             foundCell = true;
-                            break;
+                            break 'a;
                         } else {
                             self.pageStack.advance();
                         }
@@ -615,9 +617,8 @@ impl BTreeCursor {
                 match pageContent.rightmostPtr() {
                     Some(right_most_pointer) => {
                         self.pageStack.advance();
-                        let mem_page = self.pager.readPage(right_most_pointer as usize).unwrap();
+                        let mem_page = self.pager.readPage(right_most_pointer as usize)?;
                         self.pageStack.push(mem_page);
-                        continue;
                     }
                     None => unreachable!("we shall not go back up! The only way is down the slope"),
                 }
@@ -625,9 +626,9 @@ impl BTreeCursor {
         }
     }
 
-    fn insert_into_page(&mut self,
-                        key: &OwnedValue,
-                        record: &OwnedRecord) -> Result<CursorResult<()>> {
+    fn insertIntoPage(&mut self,
+                      key: &OwnedValue,
+                      rec: &OwnedRecord) -> Result<CursorResult<()>> {
         loop {
             let state = &self.writeInfo.writeState;
             match state {
@@ -643,7 +644,7 @@ impl BTreeCursor {
                         return_if_locked!(page);
 
                         page.set_dirty();
-                        self.pager.add_dirty(page.getMutInner().pageId);
+                        self.pager.addDirtyPageId(page.getMutInner().pageId);
 
                         let page = page.getMutInner().pageContent.as_mut().unwrap();
                         assert!(matches!(page.getPageType(), PageType::TableLeaf));
@@ -655,32 +656,23 @@ impl BTreeCursor {
                     // TODO: if overwrite drop cell
 
                     // insert cell
-
                     let mut cell_payload: Vec<u8> = Vec::new();
-                    self.fill_cell_payload(page_type, Some(int_key), &mut cell_payload, record);
+                    self.fill_cell_payload(page_type, Some(int_key), &mut cell_payload, rec);
 
                     // insert
                     let overflow = {
                         let contents = page.getMutInner().pageContent.as_mut().unwrap();
-                        log::debug!(
-                            "insert_into_page(overflow, cell_count={})",
-                            contents.cellCount()
-                        );
-
                         self.insert_into_cell(contents, cell_payload.as_slice(), cell_idx);
                         contents.overflowCells.len()
                     };
+
                     if overflow > 0 {
                         self.writeInfo.writeState = WriteState::BalanceStart;
                     } else {
                         self.writeInfo.writeState = WriteState::Finish;
                     }
                 }
-                WriteState::BalanceStart
-                | WriteState::BalanceMoveUp
-                | WriteState::BalanceGetParentPage => {
-                    return_if_io!(self.balance_leaf());
-                }
+                WriteState::BalanceStart | WriteState::BalanceMoveUp | WriteState::BalanceGetParentPage => return_if_io!(self.balance_leaf()),
                 WriteState::Finish => {
                     self.writeInfo.writeState = WriteState::Start;
                     return Ok(CursorResult::Ok(()));
@@ -792,7 +784,7 @@ impl BTreeCursor {
         let (cell_start, cell_len) = page.cell_get_raw_region(
             cell_idx,
             self.max_local(page.getPageType()),
-            self.min_local(page.getPageType()),
+            self.min_local(),
             self.pageUsableSpace(),
         );
         self.free_cell_range(page, cell_start as u16, cell_len as u16);
@@ -842,7 +834,7 @@ impl BTreeCursor {
                     let (start, len) = page_copy.cell_get_raw_region(
                         cell_idx,
                         self.max_local(page_copy.getPageType()),
-                        self.min_local(page_copy.getPageType()),
+                        self.min_local(),
                         self.pageUsableSpace(),
                     );
                     let buf = page_copy.as_ptr();
@@ -913,7 +905,7 @@ impl BTreeCursor {
                 };
 
                 parent.set_dirty();
-                self.pager.add_dirty(parent.getMutInner().pageId);
+                self.pager.addDirtyPageId(parent.getMutInner().pageId);
                 let parent_contents = parent.getMutInner().pageContent.as_mut().unwrap();
                 // if this isn't empty next loop won't work
                 assert_eq!(parent_contents.overflowCells.len(), 0);
@@ -926,13 +918,13 @@ impl BTreeCursor {
                             cell_idx,
                             self.pager.clone(),
                             self.max_local(page_type.clone()),
-                            self.min_local(page_type.clone()),
+                            self.min_local(),
                             self.pageUsableSpace(),
                         )
                         .unwrap();
                     let found = match cell {
                         BTreeCell::TableInteriorCell(interior) => {
-                            interior._left_child_page as usize == current_idx
+                            interior.leftChildPageIndex as usize == current_idx
                         }
                         _ => unreachable!("Parent should always be a "),
                     };
@@ -940,7 +932,7 @@ impl BTreeCursor {
                         let (start, _len) = parent_contents.cell_get_raw_region(
                             cell_idx,
                             self.max_local(page_type.clone()),
-                            self.min_local(page_type.clone()),
+                            self.min_local(),
                             self.pageUsableSpace(),
                         );
                         right_pointer = start;
@@ -1025,11 +1017,11 @@ impl BTreeCursor {
                             contents.getCell(contents.cellCount() - 1,
                                              self.pager.clone(),
                                              self.max_local(contents.getPageType()),
-                                             self.min_local(contents.getPageType()),
+                                             self.min_local(),
                                              self.pageUsableSpace())?;
 
                         let last_cell_pointer = match last_cell {
-                            BTreeCell::TableInteriorCell(interior) => interior._left_child_page,
+                            BTreeCell::TableInteriorCell(interior) => interior.leftChildPageIndex,
                             _ => unreachable!(),
                         };
 
@@ -1054,13 +1046,13 @@ impl BTreeCursor {
                     let contents = page.getMutInner().pageContent.as_mut().unwrap();
                     let divider_cell_index = divider_cells_index[page_id_index];
                     let cell_payload = scratch_cells[divider_cell_index];
-                    let cell = read_btree_cell(
+                    let cell = readBtreeCell(
                         cell_payload,
                         &contents.getPageType(),
                         0,
                         self.pager.clone(),
                         self.max_local(contents.getPageType()),
-                        self.min_local(contents.getPageType()),
+                        self.min_local(),
                         self.pageUsableSpace(),
                     ).unwrap();
 
@@ -1084,7 +1076,7 @@ impl BTreeCursor {
                     } else {
                         // move cell
                         let key = match cell {
-                            BTreeCell::TableInteriorCell(interior) => interior._rowid,
+                            BTreeCell::TableInteriorCell(interior) => interior.rowId,
                             _ => unreachable!(),
                         };
                         let parent_cell_idx = self.find_cell(contents, key);
@@ -1166,8 +1158,8 @@ impl BTreeCursor {
                     buf.copy_within(DATABASE_HEADER_SIZE.., 0);
                 }
 
-                self.pager.add_dirty(new_root_page.getMutInner().pageId);
-                self.pager.add_dirty(child.getMutInner().pageId);
+                self.pager.addDirtyPageId(new_root_page.getMutInner().pageId);
+                self.pager.addDirtyPageId(child.getMutInner().pageId);
                 (new_root_page.getMutInner().pageId, child.getMutInner().pageId, child)
             };
 
@@ -1271,7 +1263,7 @@ impl BTreeCursor {
 
                 let size = match page_type {
                     PageType::TableInterior => {
-                        let (_, nr_key) = match read_varint(&read_buf[pc as usize..]) {
+                        let (_, nr_key) = match readVarInt(&read_buf[pc as usize..]) {
                             Ok(v) => v,
                             Err(_) => todo!(
                                 "error while parsing varint from cell, probably treat this as corruption?"
@@ -1280,13 +1272,13 @@ impl BTreeCursor {
                         4 + nr_key as u64
                     }
                     PageType::TableLeaf => {
-                        let (payload_size, nr_payload) = match read_varint(&read_buf[pc as usize..]) {
+                        let (payload_size, nr_payload) = match readVarInt(&read_buf[pc as usize..]) {
                             Ok(v) => v,
                             Err(_) => todo!(
                                 "error while parsing varint from cell, probably treat this as corruption?"
                             ),
                         };
-                        let (_, nr_key) = match read_varint(&read_buf[pc as usize + nr_payload..]) {
+                        let (_, nr_key) = match readVarInt(&read_buf[pc as usize + nr_payload..]) {
                             Ok(v) => v,
                             Err(_) => todo!(
                                 "error while parsing varint from cell, probably treat this as corruption?"
@@ -1426,7 +1418,7 @@ impl BTreeCursor {
         }
         log::debug!("fill_cell_payload(overflow)");
 
-        let min_local = self.min_local(page_type);
+        let min_local = self.min_local();
         let mut space_left = min_local + (record_buf.len() - min_local) % (self.pageUsableSpace() - 4);
 
         if space_left > max_local {
@@ -1484,12 +1476,9 @@ impl BTreeCursor {
         }
     }
 
-    fn min_local(&self, page_type: PageType) -> usize {
+    fn min_local(&self) -> usize {
         let pageUsableSpace = self.pageUsableSpace();
-        match page_type {
-            PageType::IndexInterior | PageType::TableInterior => (pageUsableSpace - 12) * 32 / 255 - 23,
-            PageType::IndexLeaf | PageType::TableLeaf => (pageUsableSpace - 12) * 32 / 255 - 23,
-        }
+        (pageUsableSpace - 12) * 32 / 255 - 23
     }
 
     fn pageUsableSpace(&self) -> usize {
@@ -1506,7 +1495,7 @@ impl BTreeCursor {
                     cell_idx,
                     self.pager.clone(),
                     self.max_local(page.getPageType()),
-                    self.min_local(page.getPageType()),
+                    self.min_local(),
                     self.pageUsableSpace(),
                 )
                 .unwrap()
@@ -1517,7 +1506,7 @@ impl BTreeCursor {
                     }
                 }
                 BTreeCell::TableInteriorCell(cell) => {
-                    if int_key <= cell._rowid {
+                    if int_key <= cell.rowId {
                         break;
                     }
                 }
@@ -1701,17 +1690,17 @@ impl Cursor for BTreeCursor {
     fn insert(&mut self,
               key: &OwnedValue,
               rec: &OwnedRecord,
-              move2Key: bool) -> Result<CursorResult<()>> {
+              movedBefore: bool) -> Result<CursorResult<()>> {
         let intKey = match key {
             OwnedValue::Integer(i) => i,
             _ => unreachable!("btree tables are indexed by integers!"),
         };
 
-        if !move2Key {
+        if !movedBefore {
             return_if_io!(self.moveTo(SeekKey::TableRowId(*intKey as u64), SeekOp::EQ));
         }
 
-        return_if_io!(self.insert_into_page(key, rec));
+        return_if_io!(self.insertIntoPage(key, rec));
 
         self.rowid.replace(Some(*intKey as u64));
 
@@ -1743,7 +1732,7 @@ impl Cursor for BTreeCursor {
             let equals = match &contents.getCell(cell_idx,
                                                  self.pager.clone(),
                                                  self.max_local(contents.getPageType()),
-                                                 self.min_local(contents.getPageType()),
+                                                 self.min_local(),
                                                  self.pageUsableSpace())? {
                 BTreeCell::TableLeafCell(l) => l._rowid == int_key,
                 _ => unreachable!(),

@@ -149,7 +149,7 @@ pub struct Pager {
     pageCache: Arc<RwLock<DumbLruPageCache>>,
     bufferPool: Rc<BufferPool>,
     pub io: Arc<dyn crate::io::IO>,
-    dirty_pages: Rc<RefCell<HashSet<usize>>>,
+    dirtyPageIds: Rc<RefCell<HashSet<usize>>>,
     db_header: Rc<RefCell<DbHeader>>,
     flush_info: RefCell<FlushInfo>,
     checkpoint_state: RefCell<CheckpointState>,
@@ -175,7 +175,7 @@ impl Pager {
             wal,
             pageCache,
             io,
-            dirty_pages: Rc::new(RefCell::new(HashSet::new())),
+            dirtyPageIds: Rc::new(RefCell::new(HashSet::new())),
             db_header: dbHeader.clone(),
             flush_info: RefCell::new(FlushInfo {
                 state: FlushState::Start,
@@ -289,10 +289,9 @@ impl Pager {
         page_cache.resize(capacity);
     }
 
-    pub fn add_dirty(&self, page_id: usize) {
-        // TODO: cehck duplicates?
-        let mut dirty_pages = RefCell::borrow_mut(&self.dirty_pages);
-        dirty_pages.insert(page_id);
+    pub fn addDirtyPageId(&self, page_id: usize) {
+        // TODO: check duplicates?
+        RefCell::borrow_mut(&self.dirtyPageIds).insert(page_id);
     }
 
     pub fn flushCache(&self) -> Result<CheckpointStatus> {
@@ -300,20 +299,17 @@ impl Pager {
             let state = self.flush_info.borrow().state.clone();
             match state {
                 FlushState::Start => {
-                    let db_size = self.db_header.borrow().database_size;
-                    for page_id in self.dirty_pages.borrow().iter() {
+                    let db_size = self.db_header.borrow().dbSize;
+                    for page_id in self.dirtyPageIds.borrow().iter() {
                         let mut cache = self.pageCache.write().unwrap();
                         let page_key = PageCacheKey::new(*page_id, Some(self.wal.borrow().getMaxFrameId()));
                         let page = cache.get(&page_key).expect("we somehow added a page to dirty list but we didn't mark it as dirty, causing cache to drop it.");
-                        let page_type = page.getMutInner().pageContent.as_ref().unwrap().maybe_page_type();
-                        trace!("cacheflush(page={}, page_type={:?}", page_id, page_type);
-                        self.wal.borrow_mut().appendFrame(
-                            page.clone(),
-                            db_size,
-                            self.flush_info.borrow().in_flight_writes.clone(),
-                        )?;
+
+                        self.wal.borrow_mut().appendFrame(page.clone(),
+                                                          db_size,
+                                                          self.flush_info.borrow().in_flight_writes.clone())?;
                     }
-                    self.dirty_pages.borrow_mut().clear();
+                    self.dirtyPageIds.borrow_mut().clear();
                     self.flush_info.borrow_mut().state = FlushState::WaitAppendFrames;
                     return Ok(CheckpointStatus::IO);
                 }
@@ -434,7 +430,7 @@ impl Pager {
     pub fn allocate_page(&self) -> Result<PageArc> {
         let header = &self.db_header;
         let mut header = RefCell::borrow_mut(header);
-        header.database_size += 1;
+        header.dbSize += 1;
         {
             // update database size
             // read sync for now
@@ -445,7 +441,7 @@ impl Pager {
                     continue;
                 }
                 first_page_ref.set_dirty();
-                self.add_dirty(1);
+                self.addDirtyPageId(1);
 
                 let contents = first_page_ref.getMutInner().pageContent.as_ref().unwrap();
                 contents.writeDbHeader(&header);
@@ -453,11 +449,11 @@ impl Pager {
             }
         }
 
-        let page = allocatePage(header.database_size as usize, &self.bufferPool, 0);
+        let page = allocatePage(header.dbSize as usize, &self.bufferPool, 0);
         {
             // setup page and add to cache
             page.set_dirty();
-            self.add_dirty(page.getMutInner().pageId);
+            self.addDirtyPageId(page.getMutInner().pageId);
             let mut cache = self.pageCache.write().unwrap();
             let page_key =
                 PageCacheKey::new(page.getMutInner().pageId, Some(self.wal.borrow().getMaxFrameId()));
