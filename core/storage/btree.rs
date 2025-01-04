@@ -1,5 +1,4 @@
 use log::debug;
-
 use crate::storage::page::Pager;
 use crate::storage::sqlite3_ondisk::{
     readBtreeCell, readVarInt, write_varint, BTreeCell, DbHeader, PageContent, PageType,
@@ -7,15 +6,12 @@ use crate::storage::sqlite3_ondisk::{
 };
 use crate::types::{Cursor, CursorResult, OwnedRecord, OwnedValue, SeekKey, SeekOp};
 use crate::Result;
-
 use std::cell::{Ref, RefCell};
 use std::pin::Pin;
 use std::rc::Rc;
 use crate::storage::sqlite3_ondisk;
 use super::page::PageArc;
-use super::sqlite3_ondisk::{
-    write_varint_to_vec, IndexInteriorCell, IndexLeafCell, OverflowCell, DATABASE_HEADER_SIZE,
-};
+use super::sqlite3_ondisk::{write_varint_to_vec, IndexInteriorCell, IndexLeafCell, OverflowCell, DATABASE_HEADER_SIZE};
 
 /// type of btree page -> u8
 const BTREE_HEADER_OFFSET_TYPE: usize = 0;
@@ -65,23 +61,6 @@ macro_rules! return_if_locked {
     }};
 }
 
-#[derive(Debug)]
-enum WriteState {
-    Start,
-    BalanceStart,
-    BalanceGetParentPage,
-    BalanceMoveUp,
-    Finish,
-}
-
-struct WriteInfo {
-    writeState: WriteState,
-    new_pages: RefCell<Vec<PageArc>>,
-    scratch_cells: RefCell<Vec<&'static [u8]>>,
-    rightmost_pointer: RefCell<Option<u32>>,
-    page_copy: RefCell<Option<PageContent>>, // this holds the copy a of a page needed for buffer references
-}
-
 pub struct BTreeCursor {
     pager: Rc<Pager>,
 
@@ -99,7 +78,6 @@ pub struct BTreeCursor {
     /// we just moved to a parent page and the parent page is an internal index page which requires to be consumed
     going_upwards: bool,
 
-    /// Write information kept in case of write yields due to I/O. Needs to be stored somewhere right :)
     writeInfo: WriteInfo,
 
     /// Page stack used to traverse the btree.
@@ -107,24 +85,156 @@ pub struct BTreeCursor {
     pageStack: PageStack,
 }
 
-/// Stack of pages representing the tree traversal order.
-/// current_page represents the current page being used in the tree and current_page - 1 would be
-/// the parent. Using current_page + 1 or higher is undefined behaviour.
-struct PageStack {
-    /// Pointer to the current page being consumed
-    curPageIndexInStack: RefCell<i32>,
+impl Cursor for BTreeCursor {
+    fn is_empty(&self) -> bool {
+        self.record.borrow().is_none()
+    }
 
-    /// List of pages in the stack. Root page will be in index 0
-    pageStack: RefCell<[Option<PageArc>; BT_CURSOR_MAX_DEPTH + 1]>,
+    fn root_page(&self) -> usize {
+        self.rootPageId
+    }
 
-    /// List of cell indices in the stack.
-    /// cell_indices[current_page] is the current cell index being consumed. Similarly
-    /// cell_indices[current_page-1] is the cell index of the parent of the current page
-    /// that we save in case of going back up.
-    /// There are two points that need special attention:
-    ///  If cell_indices[current_page] = -1, it indicates that the current iteration has reached the start of the current_page
-    ///  If cell_indices[current_page] = `cell_count`, it means that the current iteration has reached the end of the current_page
-    cell_indices: RefCell<[i32; BT_CURSOR_MAX_DEPTH + 1]>,
+    fn rewind(&mut self) -> Result<CursorResult<()>> {
+        self.move2Root();
+
+        let (rowid, record) = return_if_io!(self.get_next_record(None));
+        self.rowid.replace(rowid);
+        self.record.replace(record);
+        Ok(CursorResult::Ok(()))
+    }
+
+    fn last(&mut self) -> Result<CursorResult<()>> {
+        match self.move2Rightmost()? {
+            CursorResult::Ok(_) => self.prev(),
+            CursorResult::IO => Ok(CursorResult::IO),
+        }
+    }
+
+    fn next(&mut self) -> Result<CursorResult<()>> {
+        let (rowid, record) = return_if_io!(self.get_next_record(None));
+        self.rowid.replace(rowid);
+        self.record.replace(record);
+        Ok(CursorResult::Ok(()))
+    }
+
+    fn prev(&mut self) -> Result<CursorResult<()>> {
+        match self.get_prev_record()? {
+            CursorResult::Ok((rowid, record)) => {
+                self.rowid.replace(rowid);
+                self.record.replace(record);
+                Ok(CursorResult::Ok(()))
+            }
+            CursorResult::IO => Ok(CursorResult::IO),
+        }
+    }
+
+    fn wait_for_completion(&mut self) -> Result<()> {
+        // TODO: Wait for pager I/O to complete
+        Ok(())
+    }
+
+    fn rowid(&self) -> Result<Option<u64>> {
+        Ok(*self.rowid.borrow())
+    }
+
+    fn seek(&mut self, key: SeekKey<'_>, op: SeekOp) -> Result<CursorResult<bool>> {
+        let (rowid, record) = return_if_io!(self.seek(key, op));
+        self.rowid.replace(rowid);
+        self.record.replace(record);
+        Ok(CursorResult::Ok(rowid.is_some()))
+    }
+
+    fn seek_to_last(&mut self) -> Result<CursorResult<()>> {
+        return_if_io!(self.move2Rightmost());
+        let (rowid, record) = return_if_io!(self.get_next_record(None));
+        if rowid.is_none() {
+            let is_empty = return_if_io!(self.is_empty_table());
+            assert!(is_empty);
+            return Ok(CursorResult::Ok(()));
+        }
+        self.rowid.replace(rowid);
+        self.record.replace(record);
+        Ok(CursorResult::Ok(()))
+    }
+
+    fn record(&self) -> Result<Ref<Option<OwnedRecord>>> {
+        Ok(self.record.borrow())
+    }
+
+    fn insert(&mut self,
+              key: &OwnedValue,
+              rec: &OwnedRecord,
+              movedBefore: bool) -> Result<CursorResult<()>> {
+        let intKey = match key {
+            OwnedValue::Integer(i) => i,
+            _ => unreachable!("btree tables are indexed by integers!"),
+        };
+
+        if !movedBefore {
+            return_if_io!(self.moveTo(SeekKey::TableRowId(*intKey as u64), SeekOp::EQ));
+        }
+
+        return_if_io!(self.insertIntoPage(key, rec));
+
+        self.rowid.replace(Some(*intKey as u64));
+
+        Ok(CursorResult::Ok(()))
+    }
+
+    fn exists(&mut self, key: &OwnedValue) -> Result<CursorResult<bool>> {
+        let int_key = match key {
+            OwnedValue::Integer(i) => i,
+            _ => unreachable!("btree tables are indexed by integers!"),
+        };
+        return_if_io!(self.moveTo(SeekKey::TableRowId(*int_key as u64), SeekOp::EQ));
+        let page = self.pageStack.top();
+        // TODO(pere): request load
+        return_if_locked!(page);
+
+        let contents = page.getMutInner().pageContent.as_ref().unwrap();
+
+        // find cell
+        let int_key = match key {
+            OwnedValue::Integer(i) => *i as u64,
+            _ => unreachable!("btree tables are indexed by integers!"),
+        };
+
+        let cell_idx = self.find_cell(contents, int_key);
+        if cell_idx >= contents.cellCount() {
+            Ok(CursorResult::Ok(false))
+        } else {
+            let equals = match &contents.getCell(cell_idx,
+                                                 self.pager.clone(),
+                                                 self.max_local(contents.getPageType()),
+                                                 self.min_local(),
+                                                 self.pageUsableSpace())? {
+                BTreeCell::TableLeafCell(l) => l._rowid == int_key,
+                _ => unreachable!(),
+            };
+
+            Ok(CursorResult::Ok(equals))
+        }
+    }
+
+    fn set_null_flag(&mut self, flag: bool) {
+        self.null_flag = flag;
+    }
+
+    fn get_null_flag(&self) -> bool {
+        self.null_flag
+    }
+
+    fn btree_create(&mut self, flags: usize) -> u32 {
+        let page_type = match flags {
+            1 => PageType::TableLeaf,
+            2 => PageType::IndexLeaf,
+            _ => unreachable!("wrong create table falgs, should be 1 for table and 2 for index, got {}", flags, ),
+        };
+
+        let page = self.allocate_page(page_type, 0);
+        let id = page.getMutInner().pageId;
+        id as u32
+    }
 }
 
 impl BTreeCursor {
@@ -398,11 +508,7 @@ impl BTreeCursor {
         }
     }
 
-    fn seek(
-        &mut self,
-        key: SeekKey<'_>,
-        op: SeekOp,
-    ) -> Result<CursorResult<(Option<u64>, Option<OwnedRecord>)>> {
+    fn seek(&mut self, key: SeekKey<'_>, op: SeekOp, ) -> Result<CursorResult<(Option<u64>, Option<OwnedRecord>)>> {
         return_if_io!(self.moveTo(key.clone(), op.clone()));
 
         {
@@ -626,9 +732,7 @@ impl BTreeCursor {
         }
     }
 
-    fn insertIntoPage(&mut self,
-                      key: &OwnedValue,
-                      rec: &OwnedRecord) -> Result<CursorResult<()>> {
+    fn insertIntoPage(&mut self, key: &OwnedValue, rec: &OwnedRecord) -> Result<CursorResult<()>> {
         loop {
             let state = &self.writeInfo.writeState;
             match state {
@@ -1518,6 +1622,26 @@ impl BTreeCursor {
     }
 }
 
+/// Stack of pages representing the tree traversal order.
+/// current_page represents the current page being used in the tree and current_page - 1 would be
+/// the parent. Using current_page + 1 or higher is undefined behaviour.
+struct PageStack {
+    /// Pointer to the current page being consumed
+    curPageIndexInStack: RefCell<i32>,
+
+    /// List of pages in the stack. Root page will be in index 0
+    pageStack: RefCell<[Option<PageArc>; BT_CURSOR_MAX_DEPTH + 1]>,
+
+    /// List of cell indices in the stack.
+    /// cell_indices[current_page] is the current cell index being consumed. Similarly
+    /// cell_indices[current_page-1] is the cell index of the parent of the current page
+    /// that we save in case of going back up.
+    /// There are two points that need special attention:
+    ///  If cell_indices[current_page] = -1, it indicates that the current iteration has reached the start of the current_page
+    ///  If cell_indices[current_page] = `cell_count`, it means that the current iteration has reached the end of the current_page
+    cell_indices: RefCell<[i32; BT_CURSOR_MAX_DEPTH + 1]>,
+}
+
 impl PageStack {
     fn push(&self, page: PageArc) {
         *self.curPageIndexInStack.borrow_mut() += 1;
@@ -1585,6 +1709,23 @@ impl PageStack {
     }
 }
 
+struct WriteInfo {
+    writeState: WriteState,
+    new_pages: RefCell<Vec<PageArc>>,
+    scratch_cells: RefCell<Vec<&'static [u8]>>,
+    rightmost_pointer: RefCell<Option<u32>>,
+    page_copy: RefCell<Option<PageContent>>, // this holds the copy a of a page needed for buffer references
+}
+
+#[derive(Debug)]
+enum WriteState {
+    Start,
+    BalanceStart,
+    BalanceGetParentPage,
+    BalanceMoveUp,
+    Finish,
+}
+
 fn find_free_cell(page_ref: &PageContent, db_header: Ref<DbHeader>, amount: usize) -> usize {
     // NOTE: freelist is in ascending order of keys and pc
     // unuse_space is reserved bytes at the end of page, therefore we must substract from maxpc
@@ -1608,158 +1749,6 @@ fn find_free_cell(page_ref: &PageContent, db_header: Ref<DbHeader>, amount: usiz
         0
     } else {
         pc
-    }
-}
-
-impl Cursor for BTreeCursor {
-    fn is_empty(&self) -> bool {
-        self.record.borrow().is_none()
-    }
-
-    fn root_page(&self) -> usize {
-        self.rootPageId
-    }
-
-    fn rewind(&mut self) -> Result<CursorResult<()>> {
-        self.move2Root();
-
-        let (rowid, record) = return_if_io!(self.get_next_record(None));
-        self.rowid.replace(rowid);
-        self.record.replace(record);
-        Ok(CursorResult::Ok(()))
-    }
-
-    fn last(&mut self) -> Result<CursorResult<()>> {
-        match self.move2Rightmost()? {
-            CursorResult::Ok(_) => self.prev(),
-            CursorResult::IO => Ok(CursorResult::IO),
-        }
-    }
-
-    fn next(&mut self) -> Result<CursorResult<()>> {
-        let (rowid, record) = return_if_io!(self.get_next_record(None));
-        self.rowid.replace(rowid);
-        self.record.replace(record);
-        Ok(CursorResult::Ok(()))
-    }
-
-    fn prev(&mut self) -> Result<CursorResult<()>> {
-        match self.get_prev_record()? {
-            CursorResult::Ok((rowid, record)) => {
-                self.rowid.replace(rowid);
-                self.record.replace(record);
-                Ok(CursorResult::Ok(()))
-            }
-            CursorResult::IO => Ok(CursorResult::IO),
-        }
-    }
-
-    fn wait_for_completion(&mut self) -> Result<()> {
-        // TODO: Wait for pager I/O to complete
-        Ok(())
-    }
-
-    fn rowid(&self) -> Result<Option<u64>> {
-        Ok(*self.rowid.borrow())
-    }
-
-    fn seek(&mut self, key: SeekKey<'_>, op: SeekOp) -> Result<CursorResult<bool>> {
-        let (rowid, record) = return_if_io!(self.seek(key, op));
-        self.rowid.replace(rowid);
-        self.record.replace(record);
-        Ok(CursorResult::Ok(rowid.is_some()))
-    }
-
-    fn seek_to_last(&mut self) -> Result<CursorResult<()>> {
-        return_if_io!(self.move2Rightmost());
-        let (rowid, record) = return_if_io!(self.get_next_record(None));
-        if rowid.is_none() {
-            let is_empty = return_if_io!(self.is_empty_table());
-            assert!(is_empty);
-            return Ok(CursorResult::Ok(()));
-        }
-        self.rowid.replace(rowid);
-        self.record.replace(record);
-        Ok(CursorResult::Ok(()))
-    }
-
-    fn record(&self) -> Result<Ref<Option<OwnedRecord>>> {
-        Ok(self.record.borrow())
-    }
-
-    fn insert(&mut self,
-              key: &OwnedValue,
-              rec: &OwnedRecord,
-              movedBefore: bool) -> Result<CursorResult<()>> {
-        let intKey = match key {
-            OwnedValue::Integer(i) => i,
-            _ => unreachable!("btree tables are indexed by integers!"),
-        };
-
-        if !movedBefore {
-            return_if_io!(self.moveTo(SeekKey::TableRowId(*intKey as u64), SeekOp::EQ));
-        }
-
-        return_if_io!(self.insertIntoPage(key, rec));
-
-        self.rowid.replace(Some(*intKey as u64));
-
-        Ok(CursorResult::Ok(()))
-    }
-
-    fn exists(&mut self, key: &OwnedValue) -> Result<CursorResult<bool>> {
-        let int_key = match key {
-            OwnedValue::Integer(i) => i,
-            _ => unreachable!("btree tables are indexed by integers!"),
-        };
-        return_if_io!(self.moveTo(SeekKey::TableRowId(*int_key as u64), SeekOp::EQ));
-        let page = self.pageStack.top();
-        // TODO(pere): request load
-        return_if_locked!(page);
-
-        let contents = page.getMutInner().pageContent.as_ref().unwrap();
-
-        // find cell
-        let int_key = match key {
-            OwnedValue::Integer(i) => *i as u64,
-            _ => unreachable!("btree tables are indexed by integers!"),
-        };
-
-        let cell_idx = self.find_cell(contents, int_key);
-        if cell_idx >= contents.cellCount() {
-            Ok(CursorResult::Ok(false))
-        } else {
-            let equals = match &contents.getCell(cell_idx,
-                                                 self.pager.clone(),
-                                                 self.max_local(contents.getPageType()),
-                                                 self.min_local(),
-                                                 self.pageUsableSpace())? {
-                BTreeCell::TableLeafCell(l) => l._rowid == int_key,
-                _ => unreachable!(),
-            };
-
-            Ok(CursorResult::Ok(equals))
-        }
-    }
-
-    fn set_null_flag(&mut self, flag: bool) {
-        self.null_flag = flag;
-    }
-
-    fn get_null_flag(&self) -> bool {
-        self.null_flag
-    }
-
-    fn btree_create(&mut self, flags: usize) -> u32 {
-        let page_type = match flags {
-            1 => PageType::TableLeaf,
-            2 => PageType::IndexLeaf,
-            _ => unreachable!("wrong create table falgs, should be 1 for table and 2 for index, got {}", flags, ),
-        };
-
-        let page = self.allocate_page(page_type, 0);
-        let id = page.getMutInner().pageId;
-        id as u32
     }
 }
 
