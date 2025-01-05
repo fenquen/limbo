@@ -428,10 +428,8 @@ impl Pager {
         self.pageCache.write().unwrap().clear();
     }
 
-    /*
-        Get's a new page that increasing the size of the page or uses a free page.
-        Currently free list pages are not yet supported.
-    */
+    /// get a new page that increasing the size of the page or uses a free page
+    /// currently free list pages are not yet supported.
     #[allow(clippy::readonly_write_lock)]
     pub fn allocate_page(&self) -> Result<PageArc> {
         let header = &self.db_header;
