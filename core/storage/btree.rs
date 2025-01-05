@@ -1446,46 +1446,45 @@ impl BTreeCursor {
             spaceLeft = minLocal;
         }
 
-        // cell_size must be equal to first value of space_left as this will be the bytes copied to non-overflow page.
-        let cell_size = spaceLeft + cellPayload.len() + BYTE_LEN_PAGE_NUMBER_1ST_OVERFLOW_PAGE;
+        let cellPayloadLenOld = cellPayload.len();
+
         let mut to_copy_buffer = recordBuf.as_slice();
 
-        let prev_size = cellPayload.len();
-        cellPayload.resize(prev_size + spaceLeft + 4, 0);
-        let mut pointer = unsafe { cellPayload.as_mut_ptr().add(prev_size) };
-        let mut pointer_to_next = unsafe { cellPayload.as_mut_ptr().add(prev_size + spaceLeft) };
+        cellPayload.resize(cellPayloadLenOld + spaceLeft + BYTE_LEN_PAGE_NUMBER_1ST_OVERFLOW_PAGE, 0);
+        let mut dataPos = unsafe { cellPayload.as_mut_ptr().add(cellPayloadLenOld) };
+        // 末尾的4字节是头个overflowPage的id
+        let mut nextOverflowPageIdPos = unsafe { cellPayload.as_mut_ptr().add(cellPayloadLenOld + spaceLeft) };
 
+        // 要是有overflow,那么cell的末尾4字节是第头个overflow page的id,然后后面的各个overflow page的头4 byte是下个 overflow page的id
         loop {
-            let to_copy = spaceLeft.min(to_copy_buffer.len());
-            unsafe { std::ptr::copy(to_copy_buffer.as_ptr(), pointer, to_copy) };
+            let copyCount = spaceLeft.min(to_copy_buffer.len());
+            unsafe { std::ptr::copy(to_copy_buffer.as_ptr(), dataPos, copyCount) };
 
-            let left = to_copy_buffer.len() - to_copy;
-            if left == 0 {
+            if to_copy_buffer.len() - copyCount == 0 {
                 break;
             }
 
             // we still have bytes to add, we will need to allocate new overflow page
-            let overflow_page = self.allocate_overflow_page();
+            let overflowPage = self.allocate_overflow_page();
 
             {
-                let overflowPageId = overflow_page.getMutInner().pageId as u32;
-                let contents = overflow_page.getMutInner().pageContent.as_mut().unwrap();
+                let overflowPageId = overflowPage.getMutInner().pageId as u32;
+                let pageContent = overflowPage.getMutInner().pageContent.as_mut().unwrap();
 
                 // TODO: take into account offset here?
-                let buf = contents.as_ptr();
+                let buf = pageContent.as_ptr();
 
                 // update pointer to new overflow page
-                unsafe { std::ptr::copy(overflowPageId.to_be_bytes().as_ptr(), pointer_to_next, 4) };
+                unsafe { std::ptr::copy(overflowPageId.to_be_bytes().as_ptr(), nextOverflowPageIdPos, BYTE_LEN_PAGE_NUMBER_1ST_OVERFLOW_PAGE) };
 
-                pointer = unsafe { buf.as_mut_ptr().add(4) };
-                pointer_to_next = buf.as_mut_ptr();
+                dataPos = unsafe { buf.as_mut_ptr().add(BYTE_LEN_PAGE_NUMBER_1ST_OVERFLOW_PAGE) };
+                // 各个overflowPage的头4 byte是下个overflow page的id
+                nextOverflowPageIdPos = buf.as_mut_ptr();
                 spaceLeft = self.pageUsableSpace() - 4;
             }
 
-            to_copy_buffer = &to_copy_buffer[to_copy..];
+            to_copy_buffer = &to_copy_buffer[copyCount..];
         }
-
-        assert_eq!(cell_size, cellPayload.len());
     }
 
     fn maxLocal(&self, page_type: PageType) -> usize {
