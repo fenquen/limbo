@@ -1,36 +1,19 @@
 use log::debug;
-use crate::storage::page::Pager;
+use crate::storage::page;
 use crate::storage::sqlite3_ondisk::{
     readBtreeCell, readVarInt, write_varint, BTreeCell, DbHeader, PageContent, PageType,
     TableInteriorCell, TableLeafCell,
 };
 use crate::types::{Cursor, CursorResult, OwnedRecord, OwnedValue, SeekKey, SeekOp};
-use crate::Result;
+use crate::{Pager, Result};
 use std::cell::{Ref, RefCell};
 use std::pin::Pin;
 use std::rc::Rc;
 use crate::storage::sqlite3_ondisk;
 use super::page::PageArc;
-use super::sqlite3_ondisk::{write_varint_to_vec, IndexInteriorCell, IndexLeafCell, OverflowCell, DB_HEADER_SIZE};
+use super::sqlite3_ondisk::{writeVarInt2Vec, IndexInteriorCell, IndexLeafCell, OverflowCell, DB_HEADER_SIZE};
 
-/// type of btree page -> u8
-const PAGE_HEADER_OFFSET_TYPE: usize = 0;
-
-/// pointer to first freeblock -> u16
-const PAGE_HEADER_OFFSET_FREE_BLOCK: usize = 1;
-
-/// number of cells in the page -> u16
-const PAGE_HEADER_OFFSET_CELL_COUNT: usize = 3;
-
-/// pointer to first byte of cell allocated content from top -> u16
-const PAGE_HEADER_OFFSET_CELL_CONTENT: usize = 5;
-
-/// number of fragmented bytes -> u8
-const PAGE_HEADER_OFFSET_FRAGMENTED: usize = 7;
-
-/// if internal node, pointer right most pointer (saved separately from cells) -> u32
-const PAGE_HEADER_OFFSET_RIGHTMOST: usize = 8;
-
+const BYTE_LEN_PAGE_NUMBER_1ST_OVERFLOW_PAGE: usize = 4;
 /*
 ** Maximum depth of an SQLite B-Tree structure. Any B-Tree deeper than
 ** this will be declared corrupt. This value is calculated based on a
@@ -40,7 +23,7 @@ const PAGE_HEADER_OFFSET_RIGHTMOST: usize = 8;
 ** If a tree that appears to be taller than this is encountered, it is
 ** assumed that the database is corrupt.
 */
-pub const BT_CURSOR_MAX_DEPTH: usize = 20;
+const BT_CURSOR_MAX_DEPTH: usize = 20;
 
 /// Evaluate a Result<CursorResult<T>>, if IO return IO.
 macro_rules! return_if_io {
@@ -207,7 +190,7 @@ impl Cursor for BTreeCursor {
             let equals = match &contents.getCell(cell_idx,
                                                  self.pager.clone(),
                                                  self.maxLocal(contents.getPageType()),
-                                                 self.min_local(),
+                                                 self.minLocal(),
                                                  self.pageUsableSpace())? {
                 BTreeCell::TableLeafCell(l) => l.rowId == int_key,
                 _ => unreachable!(),
@@ -232,7 +215,7 @@ impl Cursor for BTreeCursor {
             _ => unreachable!("wrong create table falgs, should be 1 for table and 2 for index, got {}", flags, ),
         };
 
-        let page = self.allocate_page(page_type, 0);
+        let page = self.allocatePage(page_type, 0);
         let id = page.getMutInner().pageId;
         id as u32
     }
@@ -322,7 +305,7 @@ impl BTreeCursor {
                 cell_idx,
                 self.pager.clone(),
                 self.maxLocal(contents.getPageType()),
-                self.min_local(),
+                self.minLocal(),
                 self.pageUsableSpace(),
             )?;
 
@@ -403,7 +386,7 @@ impl BTreeCursor {
                 cell_idx,
                 self.pager.clone(),
                 self.maxLocal(contents.getPageType()),
-                self.min_local(),
+                self.minLocal(),
                 self.pageUsableSpace(),
             )?;
             match &cell {
@@ -513,7 +496,7 @@ impl BTreeCursor {
                     cell_idx,
                     self.pager.clone(),
                     self.maxLocal(contents.getPageType()),
-                    self.min_local(),
+                    self.minLocal(),
                     self.pageUsableSpace(),
                 )?;
                 match &cell {
@@ -662,7 +645,7 @@ impl BTreeCursor {
                 match &pageContent.getCell(cellIndex,
                                            self.pager.clone(),
                                            self.maxLocal(pageContent.getPageType()),
-                                           self.min_local(),
+                                           self.minLocal(),
                                            self.pageUsableSpace())? {
                     BTreeCell::TableInteriorCell(TableInteriorCell { leftChildPageIndex, rowId }) => {
                         let SeekKey::TableRowId(rowId2Seek) = seekKey else {
@@ -807,11 +790,11 @@ impl BTreeCursor {
         pageContent.write_u16(pointer_area_pc_by_idx - pageContent.offset, pc);
 
         // update first byte of content area
-        pageContent.write_u16(PAGE_HEADER_OFFSET_CELL_CONTENT, pc);
+        pageContent.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, pc);
 
         // update cell count
         let new_n_cells = (pageContent.cellCount() + 1) as u16;
-        pageContent.write_u16(PAGE_HEADER_OFFSET_CELL_COUNT, new_n_cells);
+        pageContent.write_u16(page::PAGE_HEADER_OFFSET_CELL_COUNT, new_n_cells);
     }
 
     fn free_cell_range(&self, page: &mut PageContent, offset: u16, len: u16) {
@@ -819,7 +802,7 @@ impl BTreeCursor {
             // insert into empty list
             page.write_u16(offset as usize, 0);
             page.write_u16(offset as usize + 2, len);
-            page.write_u16(PAGE_HEADER_OFFSET_FREE_BLOCK, offset);
+            page.write_u16(page::PAGE_HEADER_OFFSET_FREE_BLOCK, offset);
             return;
         }
         let first_block = page.first_freeblock();
@@ -828,14 +811,14 @@ impl BTreeCursor {
             // insert into head of list
             page.write_u16(offset as usize, first_block);
             page.write_u16(offset as usize + 2, len);
-            page.write_u16(PAGE_HEADER_OFFSET_FREE_BLOCK, offset);
+            page.write_u16(page::PAGE_HEADER_OFFSET_FREE_BLOCK, offset);
             return;
         }
 
         if offset <= page.cell_content_area() {
             // extend boundary of content area
-            page.write_u16(PAGE_HEADER_OFFSET_FREE_BLOCK, page.first_freeblock());
-            page.write_u16(PAGE_HEADER_OFFSET_CELL_CONTENT, offset + len);
+            page.write_u16(page::PAGE_HEADER_OFFSET_FREE_BLOCK, page.first_freeblock());
+            page.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, offset + len);
             return;
         }
 
@@ -873,14 +856,13 @@ impl BTreeCursor {
     }
 
     fn drop_cell(&self, page: &mut PageContent, cell_idx: usize) {
-        let (cell_start, cell_len) = page.cell_get_raw_region(
-            cell_idx,
-            self.maxLocal(page.getPageType()),
-            self.min_local(),
-            self.pageUsableSpace(),
-        );
+        let (cell_start, cell_len) =
+            page.cell_get_raw_region(cell_idx,
+                                     self.maxLocal(page.getPageType()),
+                                     self.minLocal(),
+                                     self.pageUsableSpace());
         self.free_cell_range(page, cell_start as u16, cell_len as u16);
-        page.write_u16(PAGE_HEADER_OFFSET_CELL_COUNT, page.cellCount() as u16 - 1);
+        page.write_u16(page::PAGE_HEADER_OFFSET_CELL_COUNT, page.cellCount() as u16 - 1);
     }
 
     /// This is a naive algorithm that doesn't try to distribute cells evenly by content.
@@ -925,7 +907,7 @@ impl BTreeCursor {
                     let (start, len) = page_copy.cell_get_raw_region(
                         cell_idx,
                         self.maxLocal(page_copy.getPageType()),
-                        self.min_local(),
+                        self.minLocal(),
                         self.pageUsableSpace(),
                     );
                     let buf = page_copy.as_ptr();
@@ -939,19 +921,11 @@ impl BTreeCursor {
 
                 self.writeInfo.page_copy.replace(Some(page_copy));
 
-                // allocate new pages and move cells to those new pages
-                // split procedure
+                // allocate new pages and move cells to those new pages split procedure
                 let page = current_page.getMutInner().pageContent.as_mut().unwrap();
-                assert!(
-                    matches!(
-                        page.getPageType(),
-                        PageType::TableLeaf | PageType::TableInterior
-                    ),
-                    "indexes still not supported "
-                );
+                assert!(matches!(page.getPageType(),PageType::TableLeaf | PageType::TableInterior), "indexes still not supported ");
 
-                let right_page = self.allocate_page(page.getPageType(), 0);
-                let right_page_id = right_page.getMutInner().pageId;
+                let right_page = self.allocatePage(page.getPageType(), 0);
 
                 self.writeInfo.new_pages.borrow_mut().clear();
                 self.writeInfo
@@ -999,28 +973,23 @@ impl BTreeCursor {
                 assert_eq!(parent_contents.overflowCells.len(), 0);
 
                 // Right page pointer is u32 in right most pointer, and in cell is u32 too, so we can use a *u32 to hold where we want to change this value
-                let mut right_pointer = PAGE_HEADER_OFFSET_RIGHTMOST;
+                let mut right_pointer = page::PAGE_HEADER_OFFSET_RIGHTMOST;
                 for cell_idx in 0..parent_contents.cellCount() {
-                    let cell = parent_contents
-                        .getCell(
-                            cell_idx,
-                            self.pager.clone(),
-                            self.maxLocal(page_type.clone()),
-                            self.min_local(),
-                            self.pageUsableSpace(),
-                        )
-                        .unwrap();
+                    let cell =
+                        parent_contents.getCell(cell_idx,
+                                                self.pager.clone(),
+                                                self.maxLocal(page_type.clone()),
+                                                self.minLocal(),
+                                                self.pageUsableSpace())?;
                     let found = match cell {
-                        BTreeCell::TableInteriorCell(interior) => {
-                            interior.leftChildPageIndex as usize == current_idx
-                        }
+                        BTreeCell::TableInteriorCell(interior) => interior.leftChildPageIndex as usize == current_idx,
                         _ => unreachable!("Parent should always be a "),
                     };
                     if found {
                         let (start, _len) = parent_contents.cell_get_raw_region(
                             cell_idx,
                             self.maxLocal(page_type.clone()),
-                            self.min_local(),
+                            self.minLocal(),
                             self.pageUsableSpace(),
                         );
                         right_pointer = start;
@@ -1036,17 +1005,17 @@ impl BTreeCursor {
                     assert!(page.is_dirty());
                     let contents = page.getMutInner().pageContent.as_mut().unwrap();
 
-                    contents.write_u16(PAGE_HEADER_OFFSET_FREE_BLOCK, 0);
-                    contents.write_u16(PAGE_HEADER_OFFSET_CELL_COUNT, 0);
+                    contents.write_u16(page::PAGE_HEADER_OFFSET_FREE_BLOCK, 0);
+                    contents.write_u16(page::PAGE_HEADER_OFFSET_CELL_COUNT, 0);
 
                     let db_header = RefCell::borrow(&self.dbHeader);
                     let cell_content_area_start =
                         db_header.pageSize - db_header.pageUnusedSpace as u16;
-                    contents.write_u16(PAGE_HEADER_OFFSET_CELL_CONTENT, cell_content_area_start);
+                    contents.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, cell_content_area_start);
 
-                    contents.write_u8(PAGE_HEADER_OFFSET_FRAGMENTED, 0);
+                    contents.write_u8(page::PAGE_HEADER_OFFSET_FRAGMENTED, 0);
                     if !contents.isLeaf() {
-                        contents.write_u32(PAGE_HEADER_OFFSET_RIGHTMOST, 0);
+                        contents.write_u32(page::PAGE_HEADER_OFFSET_RIGHTMOST, 0);
                     }
                 }
 
@@ -1067,15 +1036,9 @@ impl BTreeCursor {
                     } else {
                         cells_per_page
                     };
-                    debug!(
-                        "balance_leaf::distribute(page={}, cells_to_copy={})",
-                        page_id, cells_to_copy
-                    );
 
                     let cell_index_range = current_cell_index..current_cell_index + cells_to_copy;
                     for (j, cell_idx) in cell_index_range.enumerate() {
-                        debug!("balance_leaf::distribute_in_page(page={}, cells_to_copy={}, j={}, cell_idx={})", page_id, cells_to_copy, j, cell_idx);
-
                         let cell = scratch_cells[cell_idx];
                         self.insert_into_cell(contents, cell, j);
                     }
@@ -1099,7 +1062,7 @@ impl BTreeCursor {
                             contents.getCell(contents.cellCount() - 1,
                                              self.pager.clone(),
                                              self.maxLocal(contents.getPageType()),
-                                             self.min_local(),
+                                             self.minLocal(),
                                              self.pageUsableSpace())?;
 
                         let last_cell_pointer = match last_cell {
@@ -1108,16 +1071,14 @@ impl BTreeCursor {
                         };
 
                         self.drop_cell(contents, contents.cellCount() - 1);
-                        contents.write_u32(PAGE_HEADER_OFFSET_RIGHTMOST, last_cell_pointer);
+                        contents.write_u32(page::PAGE_HEADER_OFFSET_RIGHTMOST, last_cell_pointer);
                     }
 
                     // last page right most pointer points to previous right most pointer before splitting
                     let last_page = new_pages.last().unwrap();
                     let last_page_contents = last_page.getMutInner().pageContent.as_mut().unwrap();
-                    last_page_contents.write_u32(
-                        PAGE_HEADER_OFFSET_RIGHTMOST,
-                        self.writeInfo.rightmost_pointer.borrow().unwrap(),
-                    );
+                    last_page_contents.write_u32(page::PAGE_HEADER_OFFSET_RIGHTMOST,
+                                                 self.writeInfo.rightmost_pointer.borrow().unwrap());
                 }
 
                 // insert dividers in parent
@@ -1134,7 +1095,7 @@ impl BTreeCursor {
                                       0,
                                       self.pager.clone(),
                                       self.maxLocal(contents.getPageType()),
-                                      self.min_local(),
+                                      self.minLocal(),
                                       self.pageUsableSpace())?;
 
                     if is_leaf {
@@ -1192,7 +1153,7 @@ impl BTreeCursor {
         };
 
         let offset = if is_page_1 { DB_HEADER_SIZE } else { 0 };
-        let new_root_page = self.allocate_page(PageType::TableInterior, offset);
+        let new_root_page = self.allocatePage(PageType::TableInterior, offset);
         {
             let current_root = self.pageStack.top();
             let current_root_contents = current_root.getMutInner().pageContent.as_ref().unwrap();
@@ -1203,13 +1164,11 @@ impl BTreeCursor {
                 // Copy header
                 let current_root_buf = current_root_contents.as_ptr();
                 let new_root_buf = new_root_page_contents.as_ptr();
-                new_root_buf[0..DB_HEADER_SIZE]
-                    .copy_from_slice(&current_root_buf[0..DB_HEADER_SIZE]);
+                new_root_buf[0..DB_HEADER_SIZE].copy_from_slice(&current_root_buf[0..DB_HEADER_SIZE]);
             }
             // point new root right child to previous root
-            new_root_page_contents
-                .write_u32(PAGE_HEADER_OFFSET_RIGHTMOST, new_root_page_id as u32);
-            new_root_page_contents.write_u16(PAGE_HEADER_OFFSET_CELL_COUNT, 0);
+            new_root_page_contents.write_u32(page::PAGE_HEADER_OFFSET_RIGHTMOST, new_root_page_id as u32);
+            new_root_page_contents.write_u16(page::PAGE_HEADER_OFFSET_CELL_COUNT, 0);
         }
 
         /* swap splitted page buffer with new root buffer so we don't have to update page idx */
@@ -1258,9 +1217,9 @@ impl BTreeCursor {
         }
     }
 
-    fn allocate_page(&self, page_type: PageType, offset: usize) -> PageArc {
+    fn allocatePage(&self, page_type: PageType, offset: usize) -> PageArc {
         let page = self.pager.allocate_page().unwrap();
-        btreeInitPage(&page, page_type, &self.dbHeader.borrow(), offset);
+        page.init(page_type, &self.dbHeader.borrow(), offset);
         page
     }
 
@@ -1275,9 +1234,7 @@ impl BTreeCursor {
         page
     }
 
-    /*
-        Allocate space for a cell on a page.
-    */
+    /// Allocate space for a cell on a page.
     fn allocate_cell_space(&self, page_ref: &PageContent, amount: u16) -> u16 {
         let amount = amount as usize;
 
@@ -1299,13 +1256,13 @@ impl BTreeCursor {
         if gap + 2 + amount > top {
             // defragment
             self.defragment_page(page_ref, RefCell::borrow(&self.dbHeader));
-            top = page_ref.read_u16(PAGE_HEADER_OFFSET_CELL_CONTENT) as usize;
+            top = page_ref.read_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT) as usize;
         }
 
         let db_header = RefCell::borrow(&self.dbHeader);
         top -= amount;
 
-        page_ref.write_u16(PAGE_HEADER_OFFSET_CELL_CONTENT, top as u16);
+        page_ref.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, top as u16);
 
         let usable_space = (db_header.pageSize - db_header.pageUnusedSpace as u16) as usize;
         assert!(top + amount <= usable_space);
@@ -1347,24 +1304,18 @@ impl BTreeCursor {
                     PageType::TableInterior => {
                         let (_, nr_key) = match readVarInt(&read_buf[pc as usize..]) {
                             Ok(v) => v,
-                            Err(_) => todo!(
-                                "error while parsing varint from cell, probably treat this as corruption?"
-                            ),
+                            Err(_) => todo!("error while parsing varint from cell, probably treat this as corruption?"),
                         };
                         4 + nr_key as u64
                     }
                     PageType::TableLeaf => {
                         let (payload_size, nr_payload) = match readVarInt(&read_buf[pc as usize..]) {
                             Ok(v) => v,
-                            Err(_) => todo!(
-                                "error while parsing varint from cell, probably treat this as corruption?"
-                            ),
+                            Err(_) => todo!("error while parsing varint from cell, probably treat this as corruption?"),
                         };
                         let (_, nr_key) = match readVarInt(&read_buf[pc as usize + nr_payload..]) {
                             Ok(v) => v,
-                            Err(_) => todo!(
-                                "error while parsing varint from cell, probably treat this as corruption?"
-                            ),
+                            Err(_) => todo!("error while parsing varint from cell, probably treat this as corruption?"),
                         };
                         // TODO: add overflow page calculation
                         payload_size + nr_payload as u64 + nr_key as u64
@@ -1380,8 +1331,7 @@ impl BTreeCursor {
                 // set new pointer
                 write_buf[cell_idx..cell_idx + 2].copy_from_slice(&(cbrk as u16).to_be_bytes());
                 // copy payload
-                write_buf[cbrk as usize..cbrk as usize + size as usize]
-                    .copy_from_slice(&read_buf[pc as usize..pc as usize + size as usize]);
+                write_buf[cbrk as usize..cbrk as usize + size as usize].copy_from_slice(&read_buf[pc as usize..pc as usize + size as usize]);
             }
         }
 
@@ -1393,9 +1343,9 @@ impl BTreeCursor {
         let write_buf = page.as_ptr();
 
         // set new first byte of cell content
-        page.write_u16(PAGE_HEADER_OFFSET_CELL_CONTENT, cbrk as u16);
+        page.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, cbrk as u16);
         // set free block to 0, unused spaced can be retrieved from gap between cell pointer end and content start
-        page.write_u16(PAGE_HEADER_OFFSET_FREE_BLOCK, 0);
+        page.write_u16(page::PAGE_HEADER_OFFSET_FREE_BLOCK, 0);
         // set unused space to 0
         let first_cell = cloned_page.cell_content_area() as u64;
         assert!(first_cell <= cbrk);
@@ -1469,45 +1419,46 @@ impl BTreeCursor {
         assert!(matches!(pageType,PageType::TableLeaf | PageType::IndexLeaf));
 
         // TODO: make record raw from start, having to serialize is not good
-        let mut record_buf = Vec::new();
-        rec.serializeTo(&mut record_buf);
+        let mut recordBuf = Vec::new();
+        rec.serializeToVec(&mut recordBuf);
 
         // leaf都有的: payload大小
-        write_varint_to_vec(record_buf.len() as u64, cellPayload);
+        writeVarInt2Vec(recordBuf.len() as u64, cellPayload);
 
         // rowId
         if matches!(pageType, PageType::TableLeaf) {
-            write_varint_to_vec(key.unwrap(), cellPayload);
+            writeVarInt2Vec(key.unwrap(), cellPayload);
         }
 
         let maxLocal = self.maxLocal(pageType.clone());
 
         // enough allowed space to fit inside a btree page
-        if record_buf.len() <= maxLocal {
-            cellPayload.extend_from_slice(record_buf.as_slice());
-            cellPayload.resize(cellPayload.len() + 4, 0);
+        if recordBuf.len() <= maxLocal {
+            cellPayload.extend_from_slice(recordBuf.as_slice());
+            // 因为未overflow, leaf 末尾 4 byte 的 “Page number of first overflow page” 为0
+            cellPayload.resize(cellPayload.len() + BYTE_LEN_PAGE_NUMBER_1ST_OVERFLOW_PAGE, 0);
             return;
         }
 
-        let min_local = self.min_local();
-        let mut space_left = min_local + (record_buf.len() - min_local) % (self.pageUsableSpace() - 4);
+        let minLocal = self.minLocal();
+        let mut spaceLeft = minLocal + (recordBuf.len() - minLocal) % (self.pageUsableSpace() - BYTE_LEN_PAGE_NUMBER_1ST_OVERFLOW_PAGE);
 
-        if space_left > maxLocal {
-            space_left = min_local;
+        if spaceLeft > maxLocal {
+            spaceLeft = minLocal;
         }
 
         // cell_size must be equal to first value of space_left as this will be the bytes copied to non-overflow page.
-        let cell_size = space_left + cellPayload.len() + 4; // 4 is the number of bytes of pointer to first overflow page
-        let mut to_copy_buffer = record_buf.as_slice();
+        let cell_size = spaceLeft + cellPayload.len() + BYTE_LEN_PAGE_NUMBER_1ST_OVERFLOW_PAGE;
+        let mut to_copy_buffer = recordBuf.as_slice();
 
         let prev_size = cellPayload.len();
-        cellPayload.resize(prev_size + space_left + 4, 0);
+        cellPayload.resize(prev_size + spaceLeft + 4, 0);
         let mut pointer = unsafe { cellPayload.as_mut_ptr().add(prev_size) };
-        let mut pointer_to_next = unsafe { cellPayload.as_mut_ptr().add(prev_size + space_left) };
+        let mut pointer_to_next = unsafe { cellPayload.as_mut_ptr().add(prev_size + spaceLeft) };
         let mut overflow_pages = Vec::new();
 
         loop {
-            let to_copy = space_left.min(to_copy_buffer.len());
+            let to_copy = spaceLeft.min(to_copy_buffer.len());
             unsafe { std::ptr::copy(to_copy_buffer.as_ptr(), pointer, to_copy) };
 
             let left = to_copy_buffer.len() - to_copy;
@@ -1525,12 +1476,13 @@ impl BTreeCursor {
                 // TODO: take into account offset here?
                 let buf = contents.as_ptr();
                 let as_bytes = id.to_be_bytes();
+
                 // update pointer to new overflow page
                 unsafe { std::ptr::copy(as_bytes.as_ptr(), pointer_to_next, 4) };
 
                 pointer = unsafe { buf.as_mut_ptr().add(4) };
                 pointer_to_next = buf.as_mut_ptr();
-                space_left = self.pageUsableSpace() - 4;
+                spaceLeft = self.pageUsableSpace() - 4;
             }
 
             to_copy_buffer = &to_copy_buffer[to_copy..];
@@ -1547,7 +1499,7 @@ impl BTreeCursor {
         }
     }
 
-    fn min_local(&self) -> usize {
+    fn minLocal(&self) -> usize {
         let pageUsableSpace = self.pageUsableSpace();
         (pageUsableSpace - 12) * 32 / 255 - 23
     }
@@ -1565,7 +1517,7 @@ impl BTreeCursor {
             match page.getCell(cellIndex,
                                self.pager.clone(),
                                self.maxLocal(page.getPageType()),
-                               self.min_local(),
+                               self.minLocal(),
                                self.pageUsableSpace()).unwrap() {
                 BTreeCell::TableLeafCell(cell) => {
                     if intKey <= cell.rowId {
@@ -1715,27 +1667,6 @@ fn find_free_cell(page_ref: &PageContent, db_header: Ref<DbHeader>, amount: usiz
     } else {
         pc
     }
-}
-
-/// offset 只有0 和 DB_HEADER_SIZE ，区分是不是打头的page
-pub fn btreeInitPage(page: &PageArc,
-                     pageType: PageType,
-                     dbHeader: &DbHeader,
-                     offset: usize) {
-    let pageInner = page.getMutInner();
-    let pageContent = pageInner.pageContent.as_mut().unwrap();
-
-    pageContent.offset = offset;
-    pageContent.write_u8(PAGE_HEADER_OFFSET_TYPE, pageType as u8);
-    pageContent.write_u16(PAGE_HEADER_OFFSET_FREE_BLOCK, 0);
-    pageContent.write_u16(PAGE_HEADER_OFFSET_CELL_COUNT, 0);
-
-    /// page的cell的data是在page的尾部写的
-    let cellContentAreaStartPos = dbHeader.pageSize - dbHeader.pageUnusedSpace as u16;
-    pageContent.write_u16(PAGE_HEADER_OFFSET_CELL_CONTENT, cellContentAreaStartPos);
-
-    pageContent.write_u8(PAGE_HEADER_OFFSET_FRAGMENTED, 0);
-    pageContent.write_u32(PAGE_HEADER_OFFSET_RIGHTMOST, 0);
 }
 
 fn to_static_buf(buf: &[u8]) -> &'static [u8] {

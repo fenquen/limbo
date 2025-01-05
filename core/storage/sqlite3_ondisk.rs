@@ -82,6 +82,7 @@ pub struct DbHeader {
     min_embed_frac: u8,
     min_leaf_frac: u8,
     change_counter: u32,
+    /// 含有的page数量
     pub dbSize: u32,
     freelist_trunk_page: u32,
     freelist_pages: u32,
@@ -1013,11 +1014,11 @@ pub fn write_varint(buf: &mut [u8], value: u64) -> usize {
     n
 }
 
-pub fn write_varint_to_vec(value: u64, payload: &mut Vec<u8>) {
+pub fn writeVarInt2Vec(value: u64, destVec: &mut Vec<u8>) {
     let mut varint: Vec<u8> = vec![0; 9];
     let n = write_varint(&mut varint.as_mut_slice()[0..9], value);
     varint.truncate(n);
-    payload.extend_from_slice(&varint);
+    destVec.extend_from_slice(&varint);
 }
 
 pub fn begin_read_wal_header(io: &Rc<dyn File>) -> Result<Arc<RwLock<WalHeader>>> {
@@ -1207,7 +1208,7 @@ pub fn checksum_wal(
     input: (u32, u32),
     native_endian: bool, // Sqlite interprets big endian as "native"
 ) -> (u32, u32) {
-    assert!(buf.len() % 8 == 0, "buffer must be a multiple of 8");
+    assert_eq!(buf.len() % 8, 0, "buffer must be a multiple of 8");
     let mut s0: u32 = input.0;
     let mut s1: u32 = input.1;
     let mut i = 0;
@@ -1233,6 +1234,6 @@ pub fn checksum_wal(
 
 impl WalHeader {
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe { std::mem::transmute::<&WalHeader, &[u8; std::mem::size_of::<WalHeader>()]>(self) }
+        unsafe { std::mem::transmute::<&WalHeader, &[u8; size_of::<WalHeader>()]>(self) }
     }
 }

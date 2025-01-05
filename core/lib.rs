@@ -163,7 +163,7 @@ pub fn maybeInitDatabaseFile(file: &Rc<dyn File>, io: &Arc<dyn IO>) -> Result<()
         // for the first page of the database which is basically like any other btree page
         // but with a 100 byte offset, so we just init the page so that sqlite understands
         // this is a correct page.
-        btree::btreeInitPage(&firstPage, PageType::TableLeaf, &dbHeader, DB_HEADER_SIZE);
+        firstPage.init( PageType::TableLeaf, &dbHeader, DB_HEADER_SIZE);
 
         let pageContent = firstPage.getMutInner().pageContent.as_mut().unwrap();
 

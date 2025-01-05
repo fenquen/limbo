@@ -1,6 +1,6 @@
 use crate::storage::buffer_pool::BufferPool;
 use crate::storage::Storage;
-use crate::storage::sqlite3_ondisk::{self, DbHeader, PageContent};
+use crate::storage::sqlite3_ondisk::{self, DbHeader, PageContent, PageType};
 use crate::storage::wal::Wal;
 use crate::{Buffer, Result};
 use log::{debug, trace};
@@ -13,17 +13,23 @@ use std::sync::{Arc, RwLock};
 use super::page_cache::{DumbLruPageCache, PageCacheKey};
 use super::wal::CheckpointStatus;
 
+/// type of btree page -> u8
+pub const PAGE_HEADER_OFFSET_TYPE: usize = 0;
+/// pointer to first freeblock -> u16
+pub const PAGE_HEADER_OFFSET_FREE_BLOCK: usize = 1;
+/// number of cells in the page -> u16
+pub const PAGE_HEADER_OFFSET_CELL_COUNT: usize = 3;
+/// pointer to first byte of cell allocated content from top -> u16
+pub const PAGE_HEADER_OFFSET_CELL_CONTENT: usize = 5;
+/// number of fragmented bytes -> u8
+pub const PAGE_HEADER_OFFSET_FRAGMENTED: usize = 7;
+/// if internal node, pointer right most pointer (saved separately from cells) -> u32
+pub const PAGE_HEADER_OFFSET_RIGHTMOST: usize = 8;
+
 pub struct Page {
     pub pageInner: UnsafeCell<PageInner>,
 }
 
-pub struct PageInner {
-    pub flags: AtomicUsize,
-    pub pageContent: Option<PageContent>,
-    pub pageId: usize,
-}
-
-// Concurrency control of pages will be handled by the pager, we won't wrap Page with RwLock because that is bad bad.
 pub type PageArc = Arc<Page>;
 
 /// Page is up-to-date.
@@ -47,6 +53,26 @@ impl Page {
                     pageId,
                 }),
         }
+    }
+
+    pub fn init(self: &PageArc,
+                pageType: PageType,
+                dbHeader: &DbHeader,
+                offset: usize) {
+        let pageInner = self.getMutInner();
+        let pageContent = pageInner.pageContent.as_mut().unwrap();
+
+        pageContent.offset = offset;
+        pageContent.write_u8(PAGE_HEADER_OFFSET_TYPE, pageType as u8);
+        pageContent.write_u16(PAGE_HEADER_OFFSET_FREE_BLOCK, 0);
+        pageContent.write_u16(PAGE_HEADER_OFFSET_CELL_COUNT, 0);
+
+        /// page的cell的data是在page的尾部写的
+        let cellContentAreaStartPos = dbHeader.pageSize - dbHeader.pageUnusedSpace as u16;
+        pageContent.write_u16(PAGE_HEADER_OFFSET_CELL_CONTENT, cellContentAreaStartPos);
+
+        pageContent.write_u8(PAGE_HEADER_OFFSET_FRAGMENTED, 0);
+        pageContent.write_u32(PAGE_HEADER_OFFSET_RIGHTMOST, 0);
     }
 
     pub fn getMutInner(&self) -> &mut PageInner {
@@ -110,34 +136,14 @@ impl Page {
     }
 
     pub fn clear_loaded(&self) {
-        log::debug!("clear loaded {}", self.getMutInner().pageId);
         self.getMutInner().flags.fetch_and(!PAGE_LOADED, Ordering::SeqCst);
     }
 }
 
-#[derive(Clone)]
-enum FlushState {
-    Start,
-    WaitAppendFrames,
-    SyncWal,
-    Checkpoint,
-    SyncDbFile,
-    WaitSyncDbFile,
-}
-
-#[derive(Clone, Debug)]
-enum CheckpointState {
-    Checkpoint,
-    SyncDbFile,
-    WaitSyncDbFile,
-    CheckpointDone,
-}
-
-/// This will keep track of the state of current cache flush in order to not repeat work
-struct FlushInfo {
-    state: FlushState,
-    /// Number of writes taking place. When in_flight gets to 0 we can schedule a fsync.
-    in_flight_writes: Rc<RefCell<usize>>,
+pub struct PageInner {
+    pub flags: AtomicUsize,
+    pub pageContent: Option<PageContent>,
+    pub pageId: usize,
 }
 
 /// The pager interface implements the persistence layer by providing access
@@ -178,7 +184,7 @@ impl Pager {
             dirtyPageIds: Rc::new(RefCell::new(HashSet::new())),
             db_header: dbHeader.clone(),
             flush_info: RefCell::new(FlushInfo {
-                state: FlushState::Start,
+                flushState: FlushState::Start,
                 in_flight_writes: Rc::new(RefCell::new(0)),
             }),
             syncing: Rc::new(RefCell::new(false)),
@@ -296,7 +302,7 @@ impl Pager {
 
     pub fn flushCache(&self) -> Result<CheckpointStatus> {
         loop {
-            let state = self.flush_info.borrow().state.clone();
+            let state = self.flush_info.borrow().flushState.clone();
             match state {
                 FlushState::Start => {
                     let db_size = self.db_header.borrow().dbSize;
@@ -310,12 +316,12 @@ impl Pager {
                                                           self.flush_info.borrow().in_flight_writes.clone())?;
                     }
                     self.dirtyPageIds.borrow_mut().clear();
-                    self.flush_info.borrow_mut().state = FlushState::WaitAppendFrames;
+                    self.flush_info.borrow_mut().flushState = FlushState::WaitAppendFrames;
                     return Ok(CheckpointStatus::IO);
                 }
                 FlushState::WaitAppendFrames => {
                     if *self.flush_info.borrow().in_flight_writes.borrow() == 0 {
-                        self.flush_info.borrow_mut().state = FlushState::SyncWal;
+                        self.flush_info.borrow_mut().flushState = FlushState::SyncWal;
                     } else {
                         return Ok(CheckpointStatus::IO);
                     }
@@ -329,30 +335,30 @@ impl Pager {
 
                     let should_checkpoint = self.wal.borrow().shouldCheckPoint();
                     if should_checkpoint {
-                        self.flush_info.borrow_mut().state = FlushState::Checkpoint;
+                        self.flush_info.borrow_mut().flushState = FlushState::Checkpoint;
                     } else {
-                        self.flush_info.borrow_mut().state = FlushState::Start;
+                        self.flush_info.borrow_mut().flushState = FlushState::Start;
                         break;
                     }
                 }
                 FlushState::Checkpoint => {
                     match self.checkpoint()? {
                         CheckpointStatus::Done => {
-                            self.flush_info.borrow_mut().state = FlushState::SyncDbFile;
+                            self.flush_info.borrow_mut().flushState = FlushState::SyncDbFile;
                         }
                         CheckpointStatus::IO => return Ok(CheckpointStatus::IO),
                     };
                 }
                 FlushState::SyncDbFile => {
                     sqlite3_ondisk::begin_sync(self.storage.clone(), self.syncing.clone())?;
-                    self.flush_info.borrow_mut().state = FlushState::WaitSyncDbFile;
+                    self.flush_info.borrow_mut().flushState = FlushState::WaitSyncDbFile;
                 }
                 FlushState::WaitSyncDbFile => {
                     if *self.syncing.borrow() {
                         return Ok(CheckpointStatus::IO);
                     }
 
-                    self.flush_info.borrow_mut().state = FlushState::Start;
+                    self.flush_info.borrow_mut().flushState = FlushState::Start;
                     break;
                 }
             }
@@ -474,6 +480,31 @@ impl Pager {
         let db_header = self.db_header.borrow();
         (db_header.pageSize - db_header.pageUnusedSpace as u16) as usize
     }
+}
+
+#[derive(Clone, Debug)]
+enum CheckpointState {
+    Checkpoint,
+    SyncDbFile,
+    WaitSyncDbFile,
+    CheckpointDone,
+}
+
+/// This will keep track of the state of current cache flush in order to not repeat work
+struct FlushInfo {
+    flushState: FlushState,
+    /// Number of writes taking place. When in_flight gets to 0 we can schedule a fsync.
+    in_flight_writes: Rc<RefCell<usize>>,
+}
+
+#[derive(Clone)]
+enum FlushState {
+    Start,
+    WaitAppendFrames,
+    SyncWal,
+    Checkpoint,
+    SyncDbFile,
+    WaitSyncDbFile,
 }
 
 // db文件的头个的page的id是1,它的前面有100 byte的database header
