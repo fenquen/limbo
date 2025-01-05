@@ -47,7 +47,6 @@ macro_rules! return_if_locked {
 pub struct BTreeCursor {
     pager: Rc<Pager>,
 
-    /// Page id of the root page used to go back up fast.
     rootPageId: usize,
 
     rowId: RefCell<Option<u64>>,
@@ -1470,15 +1469,14 @@ impl BTreeCursor {
             let overflow_page = self.allocate_overflow_page();
             overflow_pages.push(overflow_page.clone());
             {
-                let id = overflow_page.getMutInner().pageId as u32;
+                let overflowPageId = overflow_page.getMutInner().pageId as u32;
                 let contents = overflow_page.getMutInner().pageContent.as_mut().unwrap();
 
                 // TODO: take into account offset here?
                 let buf = contents.as_ptr();
-                let as_bytes = id.to_be_bytes();
 
                 // update pointer to new overflow page
-                unsafe { std::ptr::copy(as_bytes.as_ptr(), pointer_to_next, 4) };
+                unsafe { std::ptr::copy(overflowPageId.to_be_bytes().as_ptr(), pointer_to_next, 4) };
 
                 pointer = unsafe { buf.as_mut_ptr().add(4) };
                 pointer_to_next = buf.as_mut_ptr();

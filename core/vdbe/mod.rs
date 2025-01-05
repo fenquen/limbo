@@ -1447,10 +1447,7 @@ impl Program {
                         programState.pc += 1;
                     }
                 }
-                Insn::OpenReadAsync {
-                    cursorId: cursor_id,
-                    rootPage: root_page,
-                } => {
+                Insn::OpenReadAsync { cursorId: cursor_id, rootPage: root_page } => {
                     let cursor = Box::new(BTreeCursor::new(
                         pager.clone(),
                         *root_page,
