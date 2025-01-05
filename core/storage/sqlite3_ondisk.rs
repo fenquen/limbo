@@ -1016,7 +1016,6 @@ pub fn write_varint(buf: &mut [u8], value: u64) -> usize {
 pub fn write_varint_to_vec(value: u64, payload: &mut Vec<u8>) {
     let mut varint: Vec<u8> = vec![0; 9];
     let n = write_varint(&mut varint.as_mut_slice()[0..9], value);
-    write_varint(&mut varint, value);
     varint.truncate(n);
     payload.extend_from_slice(&varint);
 }
