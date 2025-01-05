@@ -1454,7 +1454,6 @@ impl BTreeCursor {
         cellPayload.resize(prev_size + spaceLeft + 4, 0);
         let mut pointer = unsafe { cellPayload.as_mut_ptr().add(prev_size) };
         let mut pointer_to_next = unsafe { cellPayload.as_mut_ptr().add(prev_size + spaceLeft) };
-        let mut overflow_pages = Vec::new();
 
         loop {
             let to_copy = spaceLeft.min(to_copy_buffer.len());
@@ -1467,7 +1466,7 @@ impl BTreeCursor {
 
             // we still have bytes to add, we will need to allocate new overflow page
             let overflow_page = self.allocate_overflow_page();
-            overflow_pages.push(overflow_page.clone());
+
             {
                 let overflowPageId = overflow_page.getMutInner().pageId as u32;
                 let contents = overflow_page.getMutInner().pageContent.as_mut().unwrap();
