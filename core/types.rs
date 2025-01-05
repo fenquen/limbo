@@ -351,8 +351,8 @@ impl OwnedRecord {
         Self { values }
     }
 
-    pub fn serialize(&self, buf: &mut Vec<u8>) {
-        let initial_i = buf.len();
+    pub fn serializeTo(&self, destBuf: &mut Vec<u8>) {
+        let initial_i = destBuf.len();
 
         for value in &self.values {
             let serial_type = match value {
@@ -366,23 +366,23 @@ impl OwnedRecord {
                 OwnedValue::Record(_) => unreachable!(),
             };
 
-            buf.resize(buf.len() + 9, 0); // Ensure space for varint
-            let len = buf.len();
-            let n = write_varint(&mut buf[len - 9..], serial_type);
-            buf.truncate(buf.len() - 9 + n); // Remove unused bytes
+            destBuf.resize(destBuf.len() + 9, 0); // Ensure space for varint
+            let len = destBuf.len();
+            let n = write_varint(&mut destBuf[len - 9..], serial_type);
+            destBuf.truncate(destBuf.len() - 9 + n); // Remove unused bytes
         }
 
-        let mut header_size = buf.len() - initial_i;
+        let mut header_size = destBuf.len() - initial_i;
 
         // write content
         for value in &self.values {
             // TODO: make integers and floats with smaller serial types
             match value {
                 OwnedValue::Null => {}
-                OwnedValue::Integer(i) => buf.extend_from_slice(&i.to_be_bytes()),
-                OwnedValue::Float(f) => buf.extend_from_slice(&f.to_be_bytes()),
-                OwnedValue::Text(t) => buf.extend_from_slice(t.as_bytes()),
-                OwnedValue::Blob(b) => buf.extend_from_slice(b),
+                OwnedValue::Integer(i) => destBuf.extend_from_slice(&i.to_be_bytes()),
+                OwnedValue::Float(f) => destBuf.extend_from_slice(&f.to_be_bytes()),
+                OwnedValue::Text(t) => destBuf.extend_from_slice(t.as_bytes()),
+                OwnedValue::Blob(b) => destBuf.extend_from_slice(b),
                 // non serializable
                 OwnedValue::Agg(_) => unreachable!(),
                 OwnedValue::Record(_) => unreachable!(),
@@ -403,7 +403,7 @@ impl OwnedRecord {
         header_bytes_buf.extend(std::iter::repeat(0).take(9));
         let n = write_varint(header_bytes_buf.as_mut_slice(), header_size as u64);
         header_bytes_buf.truncate(n);
-        buf.splice(initial_i..initial_i, header_bytes_buf.iter().cloned());
+        destBuf.splice(initial_i..initial_i, header_bytes_buf.iter().cloned());
     }
 }
 
@@ -436,7 +436,7 @@ pub trait Cursor {
     fn wait_for_completion(&mut self) -> Result<()>;
     fn rowid(&self) -> Result<Option<u64>>;
     fn seek(&mut self, key: SeekKey, op: SeekOp) -> Result<CursorResult<bool>>;
-    fn seek_to_last(&mut self) -> Result<CursorResult<()>>;
+    fn seek2Last(&mut self) -> Result<CursorResult<()>>;
     fn record(&self) -> Result<Ref<Option<OwnedRecord>>>;
     fn insert(&mut self,
               key: &OwnedValue,

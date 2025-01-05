@@ -2655,10 +2655,11 @@ impl Program {
 }
 
 fn get_new_rowid<R: Rng>(cursor: &mut Box<dyn Cursor>, mut rng: R) -> Result<CursorResult<i64>> {
-    match cursor.seek_to_last()? {
+    match cursor.seek2Last()? {
         CursorResult::Ok(()) => {}
         CursorResult::IO => return Ok(CursorResult::IO),
     }
+
     let mut rowid = cursor.rowid()?.unwrap_or(0) + 1;
     if rowid > i64::MAX.try_into().unwrap() {
         let distribution = Uniform::from(1..=i64::MAX);
@@ -2669,9 +2670,7 @@ fn get_new_rowid<R: Rng>(cursor: &mut Box<dyn Cursor>, mut rng: R) -> Result<Cur
                 CursorResult::Ok(false) => break, // Found a non-existing rowid
                 CursorResult::Ok(true) => {
                     if count == max_attempts - 1 {
-                        return Err(LimboError::InternalError(
-                            "Failed to generate a new rowid".to_string(),
-                        ));
+                        return Err(LimboError::InternalError("Failed to generate a new rowid".to_string()));
                     } else {
                         continue; // Try next random rowid
                     }

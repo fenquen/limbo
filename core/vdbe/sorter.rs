@@ -82,7 +82,7 @@ impl Cursor for Sorter {
         unimplemented!();
     }
 
-    fn seek_to_last(&mut self) -> Result<CursorResult<()>> {
+    fn seek2Last(&mut self) -> Result<CursorResult<()>> {
         unimplemented!();
     }
 

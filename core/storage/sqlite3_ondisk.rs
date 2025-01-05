@@ -58,7 +58,7 @@ use std::sync::{Arc, RwLock};
 use super::page::PageArc;
 
 /// The size of the database header in bytes.
-pub const DATABASE_HEADER_SIZE: usize = 100;
+pub const DB_HEADER_SIZE: usize = 100;
 
 // DEFAULT_CACHE_SIZE negative values mean that we store the amount of pages a XKiB of memory can hold.
 // We can calculate "real" cache size by diving by page size.
@@ -321,6 +321,7 @@ pub struct OverflowCell {
 
 #[derive(Debug)]
 pub struct PageContent {
+    /// 如果是打头的page那么它是DB_HEADER_SIZE,不然的话是0
     pub offset: usize,
     /// 大小和page相同,因为bufferPool生成的时候配置的参数是dbHeader的pageSize
     pub buffer: Rc<RefCell<Buffer>>,
@@ -566,7 +567,7 @@ pub fn beginReadPage(storage: Rc<dyn Storage>,
 fn finish_read_page(page_idx: usize, buffer_ref: Rc<RefCell<Buffer>>, page: PageArc) -> Result<()> {
     trace!("finish_read_btree_page(page_idx = {})", page_idx);
     let pos = if page_idx == 1 {
-        DATABASE_HEADER_SIZE
+        DB_HEADER_SIZE
     } else {
         0
     };
@@ -648,7 +649,7 @@ pub struct TableInteriorCell {
 
 #[derive(Debug, Clone)]
 pub struct TableLeafCell {
-    pub _rowid: u64,
+    pub rowId: u64,
     pub _payload: Vec<u8>,
     pub first_overflow_page: Option<u32>,
 }
@@ -703,7 +704,7 @@ pub fn readBtreeCell(pageData: &[u8],
             let (payload, first_overflow_page) = read_payload(&pageData[pos..pos + to_read], payloadSize as usize, pager);
 
             Ok(BTreeCell::TableLeafCell(TableLeafCell {
-                _rowid: rowid,
+                rowId: rowid,
                 _payload: payload,
                 first_overflow_page,
             }))

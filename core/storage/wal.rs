@@ -280,7 +280,7 @@ impl Wal for WalFile {
                     }
                 }
                 CheckpointState::WritePage => {
-                    self.ongoing_checkpoint.page.set_dirty();
+                    self.ongoing_checkpoint.page.setDirty();
                     begin_write_btree_page(
                         pager,
                         &self.ongoing_checkpoint.page,

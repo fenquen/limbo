@@ -29,7 +29,7 @@ use std::{cell::RefCell, rc::Rc};
 #[cfg(feature = "fs")]
 use storage::FileStorage;
 use storage::page_cache::DumbLruPageCache;
-use storage::sqlite3_ondisk::{DbHeader, DATABASE_HEADER_SIZE};
+use storage::sqlite3_ondisk::{DbHeader, DB_HEADER_SIZE};
 pub use storage::wal::WalFile;
 pub use storage::wal::WalFileShared;
 use util::parse_schema_rows;
@@ -156,14 +156,14 @@ pub fn maybeInitDatabaseFile(file: &Rc<dyn File>, io: &Arc<dyn IO>) -> Result<()
     let dbHeader = DbHeader::default();
 
     let firstPage =
-        page::allocatePage(1, &Rc::new(BufferPool::new(dbHeader.pageSize as usize)), DATABASE_HEADER_SIZE);
+        page::allocatePage(1, &Rc::new(BufferPool::new(dbHeader.pageSize as usize)), DB_HEADER_SIZE);
 
     {
         // Create the sqlite_schema table, for this we just need to create the btree page
         // for the first page of the database which is basically like any other btree page
         // but with a 100 byte offset, so we just init the page so that sqlite understands
         // this is a correct page.
-        btree::btreeInitPage(&firstPage, PageType::TableLeaf, &dbHeader, DATABASE_HEADER_SIZE);
+        btree::btreeInitPage(&firstPage, PageType::TableLeaf, &dbHeader, DB_HEADER_SIZE);
 
         let pageContent = firstPage.getMutInner().pageContent.as_mut().unwrap();
 

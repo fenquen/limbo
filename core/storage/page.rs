@@ -93,7 +93,7 @@ impl Page {
         self.getMutInner().flags.load(Ordering::SeqCst) & PAGE_DIRTY != 0
     }
 
-    pub fn set_dirty(&self) {
+    pub fn setDirty(&self) {
         self.getMutInner().flags.fetch_or(PAGE_DIRTY, Ordering::SeqCst);
     }
 
@@ -141,8 +141,8 @@ struct FlushInfo {
 }
 
 /// The pager interface implements the persistence layer by providing access
-/// to pages of the database file, including caching, concurrency control, and
-/// transaction management.
+/// to pages of the database file, including caching, concurrency control, and transaction management
+///https://www.sqlite.org/fileformat.html#btree page格式
 pub struct Pager {
     pub storage: Rc<dyn Storage>,
     wal: Rc<RefCell<dyn Wal>>,
@@ -289,9 +289,9 @@ impl Pager {
         page_cache.resize(capacity);
     }
 
-    pub fn addDirtyPageId(&self, page_id: usize) {
+    pub fn addDirtyPageId(&self, pageId: usize) {
         // TODO: check duplicates?
-        RefCell::borrow_mut(&self.dirtyPageIds).insert(page_id);
+        RefCell::borrow_mut(&self.dirtyPageIds).insert(pageId);
     }
 
     pub fn flushCache(&self) -> Result<CheckpointStatus> {
@@ -440,7 +440,7 @@ impl Pager {
                     self.io.runOnce()?;
                     continue;
                 }
-                first_page_ref.set_dirty();
+                first_page_ref.setDirty();
                 self.addDirtyPageId(1);
 
                 let contents = first_page_ref.getMutInner().pageContent.as_ref().unwrap();
@@ -452,7 +452,7 @@ impl Pager {
         let page = allocatePage(header.dbSize as usize, &self.bufferPool, 0);
         {
             // setup page and add to cache
-            page.set_dirty();
+            page.setDirty();
             self.addDirtyPageId(page.getMutInner().pageId);
             let mut cache = self.pageCache.write().unwrap();
             let page_key =
