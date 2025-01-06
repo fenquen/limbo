@@ -26,6 +26,13 @@ pub const PAGE_HEADER_OFFSET_FRAGMENTED: usize = 7;
 /// if internal node, pointer right most pointer (saved separately from cells) -> u32
 pub const PAGE_HEADER_OFFSET_RIGHTMOST: usize = 8;
 
+/// 非leaf特有
+pub const RIGHTMOST_CHILD_PAGE_INDEX_BYTE_LEN: usize = 4;
+
+pub const POINTER_CELL_BYTE_LEN: usize = 2;
+
+pub const FRAGMENT_MAX_BYTE_LEN: usize = 3;
+
 pub struct Page {
     pub pageInner: UnsafeCell<PageInner>,
 }
@@ -68,7 +75,7 @@ impl Page {
         pageContent.write_u16(PAGE_HEADER_OFFSET_CELL_COUNT, 0);
 
         /// page的cell的data是在page的尾部写的
-        let cellContentAreaStartPos = dbHeader.pageSize - dbHeader.pageUnusedSpace as u16;
+        let cellContentAreaStartPos = dbHeader.pageSize - dbHeader.pageReservedSpace as u16;
         pageContent.write_u16(PAGE_HEADER_OFFSET_CELL_CONTENT, cellContentAreaStartPos);
 
         pageContent.write_u8(PAGE_HEADER_OFFSET_FRAGMENTED, 0);
@@ -148,7 +155,7 @@ pub struct PageInner {
 
 /// The pager interface implements the persistence layer by providing access
 /// to pages of the database file, including caching, concurrency control, and transaction management
-///https://www.sqlite.org/fileformat.html#btree page格式
+/// https://www.sqlite.org/fileformat.html#btree page格式
 pub struct Pager {
     pub storage: Rc<dyn Storage>,
     wal: Rc<RefCell<dyn Wal>>,
@@ -156,7 +163,7 @@ pub struct Pager {
     bufferPool: Rc<BufferPool>,
     pub io: Arc<dyn crate::io::IO>,
     dirtyPageIds: Rc<RefCell<HashSet<usize>>>,
-    db_header: Rc<RefCell<DbHeader>>,
+    dbHeader: Rc<RefCell<DbHeader>>,
     flush_info: RefCell<FlushInfo>,
     checkpoint_state: RefCell<CheckpointState>,
     checkpoint_inflight: Rc<RefCell<usize>>,
@@ -182,7 +189,7 @@ impl Pager {
             pageCache,
             io,
             dirtyPageIds: Rc::new(RefCell::new(HashSet::new())),
-            db_header: dbHeader.clone(),
+            dbHeader: dbHeader.clone(),
             flush_info: RefCell::new(FlushInfo {
                 flushState: FlushState::Start,
                 in_flight_writes: Rc::new(RefCell::new(0)),
@@ -305,7 +312,7 @@ impl Pager {
             let state = self.flush_info.borrow().flushState.clone();
             match state {
                 FlushState::Start => {
-                    let db_size = self.db_header.borrow().dbSize;
+                    let db_size = self.dbHeader.borrow().pageCount;
                     for page_id in self.dirtyPageIds.borrow().iter() {
                         let mut cache = self.pageCache.write().unwrap();
                         let page_key = PageCacheKey::new(*page_id, Some(self.wal.borrow().getMaxFrameId()));
@@ -429,15 +436,12 @@ impl Pager {
     }
 
     /// get a new page that increasing the size of the page or uses a free page
-    /// currently free list pages are not yet supported.
+    /// currently free list pages are not yet supported
     #[allow(clippy::readonly_write_lock)]
-    pub fn allocate_page(&self) -> Result<PageArc> {
-        let header = &self.db_header;
-        let mut header = RefCell::borrow_mut(header);
-        header.dbSize += 1;
+    pub fn allocatePage(&self) -> Result<PageArc> {
+        let mut dbHeader = self.dbHeader.borrow_mut();
+        dbHeader.pageCount += 1;
         {
-            // update database size
-            // read sync for now
             loop {
                 let first_page_ref = self.readPage(1)?;
                 if first_page_ref.is_locked() {
@@ -448,19 +452,18 @@ impl Pager {
                 self.addDirtyPageId(1);
 
                 let contents = first_page_ref.getMutInner().pageContent.as_ref().unwrap();
-                contents.writeDbHeader(&header);
+                contents.writeDbHeader(&dbHeader);
                 break;
             }
         }
 
-        let page = allocatePage(header.dbSize as usize, &self.bufferPool, 0);
+        let page = allocatePage(dbHeader.pageCount as usize, &self.bufferPool, 0);
         {
             // setup page and add to cache
             page.setDirty();
             self.addDirtyPageId(page.getMutInner().pageId);
             let mut cache = self.pageCache.write().unwrap();
-            let page_key =
-                PageCacheKey::new(page.getMutInner().pageId, Some(self.wal.borrow().getMaxFrameId()));
+            let page_key = PageCacheKey::new(page.getMutInner().pageId, Some(self.wal.borrow().getMaxFrameId()));
             cache.insert(page_key, page.clone());
         }
         Ok(page)
@@ -475,8 +478,8 @@ impl Pager {
     }
 
     pub fn usable_size(&self) -> usize {
-        let db_header = self.db_header.borrow();
-        (db_header.pageSize - db_header.pageUnusedSpace as u16) as usize
+        let db_header = self.dbHeader.borrow();
+        (db_header.pageSize - db_header.pageReservedSpace as u16) as usize
     }
 }
 

@@ -6,17 +6,24 @@ use log::{debug, trace};
 
 use crate::io::{File, SyncCompletion, IO};
 use crate::storage::sqlite3_ondisk::{
-    begin_read_wal_frame, begin_write_wal_frame, WAL_FRAME_HEADER_SIZE, WAL_HEADER_SIZE,
+    begin_read_wal_frame, begin_write_wal_frame,
 };
 use crate::{Buffer, Result};
 use crate::{CompletionEnum, Page};
 
-use self::sqlite3_ondisk::{checksum_wal, PageContent, WAL_MAGIC_BE, WAL_MAGIC_LE};
+use self::sqlite3_ondisk::{checksum_wal, PageContent};
 
 use super::buffer_pool::BufferPool;
 use super::page_cache::PageCacheKey;
 use super::page::{PageArc, Pager};
 use super::sqlite3_ondisk::{self, begin_write_btree_page, WalHeader};
+
+
+pub const WAL_HEADER_SIZE: usize = 32;
+pub const WAL_FRAME_HEADER_SIZE: usize = 24;
+/// magic is a single number represented as WAL_MAGIC_LE but the big endian counterpart is just the same number with LSB set to 1.
+pub const WAL_MAGIC_LE: u32 = 0x377f0682;
+pub const WAL_MAGIC_BE: u32 = 0x377f0683;
 
 /// Write-ahead log (WAL).
 pub trait Wal {
@@ -404,27 +411,23 @@ impl WalFile {
 }
 
 impl WalFileShared {
-    pub fn open_shared(
-        io: &Arc<dyn IO>,
-        path: &str,
-        page_size: u16,
-    ) -> Result<Arc<RwLock<WalFileShared>>> {
+    pub fn open_shared(io: &Arc<dyn IO>,
+                       path: &str,
+                       page_size: u16) -> Result<Arc<RwLock<WalFileShared>>> {
         let file = io.openFile(path, crate::io::OpenFlags::Create, false)?;
+
         let header = if file.size()? > 0 {
             let wal_header = match sqlite3_ondisk::begin_read_wal_header(&file) {
                 Ok(header) => header,
                 Err(err) => panic!("Couldn't read header page: {:?}", err),
             };
-            log::info!("recover not implemented yet");
+
             // TODO: Return a completion instead.
             io.runOnce()?;
             wal_header
         } else {
-            let magic = if cfg!(target_endian = "big") {
-                WAL_MAGIC_BE
-            } else {
-                WAL_MAGIC_LE
-            };
+            let magic = if cfg!(target_endian = "big") { WAL_MAGIC_BE } else { WAL_MAGIC_LE };
+
             let mut wal_header = WalHeader {
                 magic,
                 file_format: 3007000,
@@ -451,10 +454,12 @@ impl WalFileShared {
             sqlite3_ondisk::begin_write_wal_header(&file, &wal_header)?;
             Arc::new(RwLock::new(wal_header))
         };
+
         let checksum = {
             let checksum = header.read().unwrap();
             (checksum.checksum_1, checksum.checksum_2)
         };
+
         let shared = WalFileShared {
             walHeader: header,
             minFrame: 0,
@@ -465,6 +470,7 @@ impl WalFileShared {
             file,
             pageIdsInFrame: Vec::new(),
         };
+
         Ok(Arc::new(RwLock::new(shared)))
     }
 }

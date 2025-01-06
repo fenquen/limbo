@@ -45,12 +45,12 @@
 use crate::error::LimboError;
 use crate::io::{Buffer, CompletionEnum, ReadCompletion, SyncCompletion, WriteCompletion};
 use crate::storage::buffer_pool::BufferPool;
-use crate::storage::Storage;
+use crate::storage::{page, wal, Storage};
 use crate::storage::page::Pager;
 use crate::types::{OwnedRecord, OwnedValue};
 use crate::{File, Result};
 use log::trace;
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
@@ -77,13 +77,13 @@ pub struct DbHeader {
     write_version: u8,
     read_version: u8,
     /// unused "reserved" space at the end of each page usually 0
-    pub pageUnusedSpace: u8,
+    pub pageReservedSpace: u8,
     max_embed_frac: u8,
     min_embed_frac: u8,
     min_leaf_frac: u8,
     change_counter: u32,
     /// 含有的page数量
-    pub dbSize: u32,
+    pub pageCount: u32,
     freelist_trunk_page: u32,
     freelist_pages: u32,
     schema_cookie: u32,
@@ -106,12 +106,12 @@ impl Default for DbHeader {
             pageSize: 4096,
             write_version: 2,
             read_version: 2,
-            pageUnusedSpace: 0,
+            pageReservedSpace: 0,
             max_embed_frac: 64,
             min_embed_frac: 32,
             min_leaf_frac: 32,
             change_counter: 1,
-            dbSize: 1,
+            pageCount: 1,
             freelist_trunk_page: 0,
             freelist_pages: 0,
             schema_cookie: 0,
@@ -128,13 +128,6 @@ impl Default for DbHeader {
         }
     }
 }
-
-pub const WAL_HEADER_SIZE: usize = 32;
-pub const WAL_FRAME_HEADER_SIZE: usize = 24;
-// magic is a single number represented as WAL_MAGIC_LE but the big endian
-// counterpart is just the same number with LSB set to 1.
-pub const WAL_MAGIC_LE: u32 = 0x377f0682;
-pub const WAL_MAGIC_BE: u32 = 0x377f0683;
 
 #[derive(Debug, Default, Clone)]
 #[repr(C)]
@@ -189,12 +182,12 @@ fn finish_read_database_header(buf: Rc<RefCell<Buffer>>, header: Rc<RefCell<DbHe
     dbHeader.pageSize = u16::from_be_bytes([buf[16], buf[17]]);
     dbHeader.write_version = buf[18];
     dbHeader.read_version = buf[19];
-    dbHeader.pageUnusedSpace = buf[20];
+    dbHeader.pageReservedSpace = buf[20];
     dbHeader.max_embed_frac = buf[21];
     dbHeader.min_embed_frac = buf[22];
     dbHeader.min_leaf_frac = buf[23];
     dbHeader.change_counter = u32::from_be_bytes([buf[24], buf[25], buf[26], buf[27]]);
-    dbHeader.dbSize = u32::from_be_bytes([buf[28], buf[29], buf[30], buf[31]]);
+    dbHeader.pageCount = u32::from_be_bytes([buf[28], buf[29], buf[30], buf[31]]);
     dbHeader.freelist_trunk_page = u32::from_be_bytes([buf[32], buf[33], buf[34], buf[35]]);
     dbHeader.freelist_pages = u32::from_be_bytes([buf[36], buf[37], buf[38], buf[39]]);
     dbHeader.schema_cookie = u32::from_be_bytes([buf[40], buf[41], buf[42], buf[43]]);
@@ -268,12 +261,12 @@ fn writeDbHeader2Buf(buf: &mut [u8], header: &DbHeader) {
     buf[16..18].copy_from_slice(&header.pageSize.to_be_bytes());
     buf[18] = header.write_version;
     buf[19] = header.read_version;
-    buf[20] = header.pageUnusedSpace;
+    buf[20] = header.pageReservedSpace;
     buf[21] = header.max_embed_frac;
     buf[22] = header.min_embed_frac;
     buf[23] = header.min_leaf_frac;
     buf[24..28].copy_from_slice(&header.change_counter.to_be_bytes());
-    buf[28..32].copy_from_slice(&header.dbSize.to_be_bytes());
+    buf[28..32].copy_from_slice(&header.pageCount.to_be_bytes());
     buf[32..36].copy_from_slice(&header.freelist_trunk_page.to_be_bytes());
     buf[36..40].copy_from_slice(&header.freelist_pages.to_be_bytes());
     buf[40..44].copy_from_slice(&header.schema_cookie.to_be_bytes());
@@ -342,7 +335,7 @@ impl PageContent {
     }
 
     #[allow(clippy::mut_from_ref)]
-    pub fn as_ptr(&self) -> &mut [u8] {
+    pub fn asMutSlice(&self) -> &mut [u8] {
         unsafe {
             let buffer = &self.buffer.as_ptr();
             (*buffer).as_mut().unwrap().as_mut_slice()
@@ -350,17 +343,17 @@ impl PageContent {
     }
 
     fn read_u8(&self, pos: usize) -> u8 {
-        let buf = self.as_ptr();
+        let buf = self.asMutSlice();
         buf[self.offset + pos]
     }
 
     pub fn read_u16(&self, pos: usize) -> u16 {
-        let buf = self.as_ptr();
+        let buf = self.asMutSlice();
         u16::from_be_bytes([buf[self.offset + pos], buf[self.offset + pos + 1]])
     }
 
     fn read_u32(&self, pos: usize) -> u32 {
-        let buf = self.as_ptr();
+        let buf = self.asMutSlice();
         u32::from_be_bytes([
             buf[self.offset + pos],
             buf[self.offset + pos + 1],
@@ -370,28 +363,28 @@ impl PageContent {
     }
 
     pub fn writeDyn<const N: usize>(&self, pos: usize, slice: &[u8; N]) {
-        let buf = self.as_ptr();
+        let buf = self.asMutSlice();
         buf[self.offset + pos..self.offset + pos + N].copy_from_slice(slice);
     }
 
     pub fn write_u8(&self, pos: usize, value: u8) {
-        let buf = self.as_ptr();
+        let buf = self.asMutSlice();
         buf[self.offset + pos] = value;
     }
 
     pub fn write_u16(&self, pos: usize, value: u16) {
         log::debug!("write_u16(pos={}, value={})", pos, value);
-        let buf = self.as_ptr();
+        let buf = self.asMutSlice();
         buf[self.offset + pos..self.offset + pos + 2].copy_from_slice(&value.to_be_bytes());
     }
 
     pub fn write_u32(&self, pos: usize, value: u32) {
         log::debug!("write_u32(pos={}, value={})", pos, value);
-        let buf = self.as_ptr();
+        let buf = self.asMutSlice();
         buf[self.offset + pos..self.offset + pos + 4].copy_from_slice(&value.to_be_bytes());
     }
 
-    pub fn first_freeblock(&self) -> u16 {
+    pub fn firstFreeBlockPos(&self) -> u16 {
         self.read_u16(1)
     }
 
@@ -399,15 +392,15 @@ impl PageContent {
         self.read_u16(3) as usize
     }
 
-    pub fn cell_content_area(&self) -> u16 {
+    pub fn cellContentAreaPos(&self) -> u16 {
         self.read_u16(5)
     }
 
-    pub fn num_frag_free_bytes(&self) -> u8 {
+    pub fn fragFreeByteCount(&self) -> u8 {
         self.read_u8(7)
     }
 
-    pub fn rightmostPtr(&self) -> Option<u32> {
+    pub fn rightmostChildPageIndex(&self) -> Option<u32> {
         match self.getPageType() {
             PageType::IndexInterior => Some(self.read_u32(8)),
             PageType::TableInterior => Some(self.read_u32(8)),
@@ -436,7 +429,7 @@ impl PageContent {
         // 乘以2的原因是 pageHeader后边存的是各个cell的2个字节大小的pos的
         let cellDataPos = self.read_u16(cellStartPos + (cellIndex * 2)) as usize;
 
-        readBtreeCell(self.as_ptr(),
+        readBtreeCell(self.asMutSlice(),
                       &self.getPageType(),
                       cellDataPos,
                       pager,
@@ -464,7 +457,7 @@ impl PageContent {
         min_local: usize,
         usable_size: usize,
     ) -> (usize, usize) {
-        let buf = self.as_ptr();
+        let buf = self.asMutSlice();
         let ncells = self.cellCount();
         let cell_start = match self.getPageType() {
             PageType::IndexInterior => 12,
@@ -526,7 +519,73 @@ impl PageContent {
     }
 
     pub fn writeDbHeader(&self, header: &DbHeader) {
-        writeDbHeader2Buf(self.as_ptr(), header);
+        writeDbHeader2Buf(self.asMutSlice(), header);
+    }
+
+    /// Free blocks can be zero, meaning the "real free space" that can be used to allocate is expected to be between first cell byte and end of cell pointer area
+    pub fn computeFreeSpace(&self, dbHeader: Ref<DbHeader>) -> u16 {
+        // TODO(pere): maybe free space is not calculated correctly with offset
+        let pageContentSlice = self.asMutSlice();
+
+        let pageUsableSpace = (dbHeader.pageSize - dbHeader.pageReservedSpace as u16) as usize;
+
+        let cellContentAreaPos = {
+            let mut cellContentAreaPos = self.cellContentAreaPos();
+            if cellContentAreaPos == 0 {
+                cellContentAreaPos = u16::MAX;
+            }
+            cellContentAreaPos
+        };
+
+        let fragFreeByteCount = self.fragFreeByteCount();
+        let firstFreeBlockPos = self.firstFreeBlockPos();
+        let cellCount = self.cellCount();
+        let rightmostChildPageIndexByteLen = if self.isLeaf() { 0 } else { page::RIGHTMOST_CHILD_PAGE_INDEX_BYTE_LEN };
+
+        let freeAreaStartPos = (self.offset + 8 + rightmostChildPageIndexByteLen + (page::POINTER_CELL_BYTE_LEN * cellCount)) as u16;
+
+        let mut freeSpace = fragFreeByteCount as usize + cellContentAreaPos as usize;
+
+        let mut freeBlockPos = firstFreeBlockPos as usize;
+        if freeBlockPos > 0 {
+            if freeBlockPos < cellContentAreaPos as usize {
+                todo!("corrupted page");
+            }
+
+            let mut nextFreeBlockPos = 0;
+            let mut freeBlockSize = 0;
+
+            loop {
+                // free block 第1,2 byte 是下个free block的pos
+                nextFreeBlockPos = u16::from_be_bytes(pageContentSlice[freeBlockPos..freeBlockPos + 2].try_into().unwrap()) as usize;
+
+                // 第3,4 byte 是 freeBlock总长度包含头4字节的
+                freeBlockSize = u16::from_be_bytes(pageContentSlice[freeBlockPos + 2..freeBlockPos + 4].try_into().unwrap()) as usize;
+
+                freeSpace += freeBlockSize;
+
+                // nextFreeBlockPos <=0 能达到同样效果
+                // 构成1个的free block 至少要4个byte 要是free的大小不够4的话 便称为 fragment  它顶大3 byte
+                if nextFreeBlockPos <= freeBlockPos + freeBlockSize + page::FRAGMENT_MAX_BYTE_LEN {
+                    break;
+                }
+
+                freeBlockPos = nextFreeBlockPos;
+            }
+
+            // 末尾的free block指向的是0
+            if nextFreeBlockPos > 0 {
+                todo!("corrupted page ascending order");
+            }
+
+            if freeBlockPos + freeBlockSize > pageUsableSpace {
+                todo!("corrupted page last freeblock extends last page end");
+            }
+        }
+
+        // don't count header and cell pointers?
+        freeSpace -= freeAreaStartPos as usize;
+        freeSpace as u16
     }
 }
 
@@ -566,17 +625,14 @@ pub fn beginReadPage(storage: Rc<dyn Storage>,
 }
 
 fn finish_read_page(page_idx: usize, buffer_ref: Rc<RefCell<Buffer>>, page: PageArc) -> Result<()> {
-    trace!("finish_read_btree_page(page_idx = {})", page_idx);
-    let pos = if page_idx == 1 {
-        DB_HEADER_SIZE
-    } else {
-        0
-    };
+    let pos = if page_idx == 1 { DB_HEADER_SIZE } else { 0 };
+
     let inner = PageContent {
         offset: pos,
         buffer: buffer_ref.clone(),
         overflowCells: Vec::new(),
     };
+
     {
         page.getMutInner().pageContent.replace(inner);
         page.set_uptodate();
@@ -586,11 +642,9 @@ fn finish_read_page(page_idx: usize, buffer_ref: Rc<RefCell<Buffer>>, page: Page
     Ok(())
 }
 
-pub fn begin_write_btree_page(
-    pager: &Pager,
-    page: &PageArc,
-    write_counter: Rc<RefCell<usize>>,
-) -> Result<()> {
+pub fn begin_write_btree_page(pager: &Pager,
+                              page: &PageArc,
+                              write_counter: Rc<RefCell<usize>>) -> Result<()> {
     let page_source = &pager.storage;
     let page_finish = page.clone();
 
@@ -624,12 +678,7 @@ pub fn begin_write_btree_page(
 pub fn begin_sync(page_io: Rc<dyn Storage>, syncing: Rc<RefCell<bool>>) -> Result<()> {
     assert!(!*syncing.borrow());
     *syncing.borrow_mut() = true;
-    let completion = CompletionEnum::Sync(SyncCompletion {
-        complete: Box::new(move |_| {
-            *syncing.borrow_mut() = false;
-        }),
-    });
-    page_io.sync(Rc::new(completion))?;
+    page_io.sync(Rc::new(CompletionEnum::Sync(SyncCompletion { complete: Box::new(move |_| { *syncing.borrow_mut() = false; }) })))?;
     Ok(())
 }
 
@@ -792,7 +841,7 @@ fn read_payload(unread: &[u8], payload_size: usize, pager: Rc<Pager>) -> (Vec<u8
             let pageContent = page.pageContent.as_mut().unwrap();
 
             let to_read = left_to_read.min(usable_size - 4);
-            let buf = pageContent.as_ptr();
+            let buf = pageContent.asMutSlice();
             payload.extend_from_slice(&buf[4..4 + to_read]);
 
             next_overflow = pageContent.read_u32(0);
@@ -1099,7 +1148,7 @@ pub fn begin_write_wal_frame(
         let drop_fn = Rc::new(|_buf| {});
 
         let mut buffer = Buffer::allocate(
-            contents.buffer.borrow().len() + WAL_FRAME_HEADER_SIZE,
+            contents.buffer.borrow().len() + wal::WAL_FRAME_HEADER_SIZE,
             drop_fn,
         );
         let buf = buffer.as_mut_slice();
@@ -1107,7 +1156,7 @@ pub fn begin_write_wal_frame(
         buf[4..8].copy_from_slice(&header.db_size.to_be_bytes());
 
         {
-            let contents_buf = contents.as_ptr();
+            let contents_buf = contents.asMutSlice();
             let expects_be = wal_header.magic & 1; // LSB is set on big endian checksums
             let use_native_endian = cfg!(target_endian = "big") as u32 == expects_be; // check if checksum
             // type and native type is the same so that we know when to swap bytes
@@ -1123,7 +1172,7 @@ pub fn begin_write_wal_frame(
         buf[12..16].copy_from_slice(&header.salt_2.to_be_bytes());
         buf[16..20].copy_from_slice(&header.checksum_1.to_be_bytes());
         buf[20..24].copy_from_slice(&header.checksum_2.to_be_bytes());
-        buf[WAL_FRAME_HEADER_SIZE..].copy_from_slice(contents.as_ptr());
+        buf[wal::WAL_FRAME_HEADER_SIZE..].copy_from_slice(contents.asMutSlice());
 
         (Rc::new(RefCell::new(buffer)), checksums)
     };
@@ -1131,7 +1180,6 @@ pub fn begin_write_wal_frame(
     *write_counter.borrow_mut() += 1;
     let write_complete = {
         let buf_copy = buffer.clone();
-        log::info!("finished");
         Box::new(move |bytes_written: i32| {
             let buf_copy = buf_copy.clone();
             let buf_len = buf_copy.borrow().len();
@@ -1169,10 +1217,8 @@ pub fn begin_write_wal_header(io: &Rc<dyn File>, header: &WalHeader) -> Result<(
 
     let write_complete = {
         Box::new(move |bytes_written: i32| {
-            if bytes_written < WAL_HEADER_SIZE as i32 {
-                log::error!(
-                    "wal header wrote({bytes_written}) less than expected({WAL_HEADER_SIZE})"
-                );
+            if bytes_written < wal::WAL_HEADER_SIZE as i32 {
+                log::error!("wal header wrote({bytes_written}) less than expected({})",wal::WAL_FRAME_HEADER_SIZE);
             }
         })
     };
@@ -1202,17 +1248,15 @@ pub fn payload_overflows(payloadSize: usize,
     (true, space_left + 4)
 }
 
-pub fn checksum_wal(
-    buf: &[u8],
-    _wal_header: &WalHeader,
-    input: (u32, u32),
-    native_endian: bool, // Sqlite interprets big endian as "native"
-) -> (u32, u32) {
+pub fn checksum_wal(buf: &[u8],
+                    _wal_header: &WalHeader,
+                    input: (u32, u32),
+                    useBigEndian: bool) -> (u32, u32) {
     assert_eq!(buf.len() % 8, 0, "buffer must be a multiple of 8");
     let mut s0: u32 = input.0;
     let mut s1: u32 = input.1;
     let mut i = 0;
-    if native_endian {
+    if useBigEndian {
         while i < buf.len() {
             let v0 = u32::from_ne_bytes(buf[i..i + 4].try_into().unwrap());
             let v1 = u32::from_ne_bytes(buf[i + 4..i + 8].try_into().unwrap());

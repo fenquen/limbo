@@ -18,8 +18,8 @@ impl BufferPool {
     }
 
     pub fn get(&self) -> BufferData {
-        let mut free_buffers = self.availBuffers.borrow_mut();
-        if let Some(buffer) = free_buffers.pop() {
+        let mut freeBufferDatas = self.availBuffers.borrow_mut();
+        if let Some(buffer) = freeBufferDatas.pop() {
             buffer
         } else {
             Pin::new(vec![0; self.bufferSize])
