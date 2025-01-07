@@ -1,7 +1,5 @@
 use sqlite3_parser::ast::{self, UnaryOperator};
 
-#[cfg(feature = "json")]
-use crate::function::JsonFunc;
 use crate::function::{AggFunc, Func, FuncCtx, MathFuncArity, ScalarFunc};
 use crate::schema::ColumnType;
 use crate::util::normalize_ident;
@@ -894,40 +892,6 @@ pub fn translateExpr(programBuilder: &mut ProgramBuilder,
                 Func::Agg(_) => {
                     crate::bail_parse_error!("aggregation function in non-aggregation context")
                 }
-                #[cfg(feature = "json")]
-                Func::Json(j) => match j {
-                    JsonFunc::Json => {
-                        let args = if let Some(args) = args {
-                            if args.len() != 1 {
-                                crate::bail_parse_error!(
-                                    "{} function with not exactly 1 argument",
-                                    j.to_string()
-                                );
-                            }
-                            args
-                        } else {
-                            crate::bail_parse_error!(
-                                "{} function with no arguments",
-                                j.to_string()
-                            );
-                        };
-                        let regs = programBuilder.allocRegister();
-                        translateExpr(
-                            programBuilder,
-                            tblRefs,
-                            &args[0],
-                            regs,
-                            precomputed_exprs_to_registers,
-                        )?;
-                        programBuilder.addInsn0(Insn::Function {
-                            constant_mask: 0,
-                            start_reg: regs,
-                            dest: destReg,
-                            func: func_ctx,
-                        });
-                        Ok(destReg)
-                    }
-                },
                 Func::Scalar(srf) => {
                     match srf {
                         ScalarFunc::Cast => {

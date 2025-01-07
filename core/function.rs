@@ -1,23 +1,6 @@
 use std::fmt;
 use std::fmt::Display;
 
-#[cfg(feature = "json")]
-#[derive(Debug, Clone, PartialEq)]
-pub enum JsonFunc {
-    Json,
-}
-
-#[cfg(feature = "json")]
-impl Display for JsonFunc {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}",
-               match self {
-                   JsonFunc::Json => "json".to_string(),
-               }
-        )
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum AggFunc {
     Avg,
@@ -257,8 +240,6 @@ pub enum Func {
     Agg(AggFunc),
     Scalar(ScalarFunc),
     Math(MathFunc),
-    #[cfg(feature = "json")]
-    Json(JsonFunc),
 }
 
 impl Display for Func {
@@ -267,8 +248,6 @@ impl Display for Func {
             Func::Agg(agg_func) => write!(f, "{}", agg_func.to_string()),
             Func::Scalar(scalar_func) => write!(f, "{}", scalar_func),
             Func::Math(math_func) => write!(f, "{}", math_func),
-            #[cfg(feature = "json")]
-            Func::Json(json_func) => write!(f, "{}", json_func),
         }
     }
 }
@@ -324,8 +303,6 @@ impl Func {
             "quote" => Ok(Func::Scalar(ScalarFunc::Quote)),
             "sqlite_version" => Ok(Func::Scalar(ScalarFunc::SqliteVersion)),
             "replace" => Ok(Func::Scalar(ScalarFunc::Replace)),
-            #[cfg(feature = "json")]
-            "json" => Ok(Func::Json(JsonFunc::Json)),
             "unixepoch" => Ok(Func::Scalar(ScalarFunc::UnixEpoch)),
             "hex" => Ok(Func::Scalar(ScalarFunc::Hex)),
             "unhex" => Ok(Func::Scalar(ScalarFunc::Unhex)),

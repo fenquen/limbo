@@ -438,7 +438,6 @@ impl PageContent {
                       pageUsableSpace)
     }
 
-    /// When using this fu
     pub fn cell_get_raw_pointer_region(&self) -> (usize, usize) {
         let cell_start = match self.getPageType() {
             PageType::IndexInterior => 12,
@@ -450,13 +449,11 @@ impl PageContent {
     }
 
     /* Get region of a cell's payload */
-    pub fn cell_get_raw_region(
-        &self,
-        idx: usize,
-        max_local: usize,
-        min_local: usize,
-        usable_size: usize,
-    ) -> (usize, usize) {
+    pub fn cell_get_raw_region(&self,
+                               idx: usize,
+                               max_local: usize,
+                               min_local: usize,
+                               usable_size: usize) -> (usize, usize) {
         let buf = self.asMutSlice();
         let ncells = self.cellCount();
         let cell_start = match self.getPageType() {
@@ -586,6 +583,147 @@ impl PageContent {
         // don't count header and cell pointers?
         freeSpace -= freeAreaStartPos as usize;
         freeSpace as u16
+    }
+
+    /// Allocate space for a cell on a page.
+    pub fn allocateCellSpace(&self, dbHeader: &Rc<RefCell<DbHeader>>, amount: usize) -> u16 {
+        let (cell_offset, _) = self.cell_get_raw_pointer_region();
+        let gapStartPos = cell_offset + page::POINTER_CELL_BYTE_LEN * self.cellCount();
+
+        let mut top = self.cellContentAreaPos() as usize;
+
+        // there are free blocks and enough space
+        if self.firstFreeBlockPos() != 0 && gapStartPos + page::POINTER_CELL_BYTE_LEN <= top {
+            // find slot
+            let pc = self.find_free_cell(dbHeader.borrow(), amount);
+            if pc != 0 {
+                return pc as u16;
+            }
+
+            // fall through, we might need to defragment
+        }
+
+        if gapStartPos + 2 + amount > top {
+            self.defragment_page(dbHeader.borrow());
+            top = self.read_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT) as usize;
+        }
+
+        let dbHeader = dbHeader.borrow();
+        top -= amount;
+
+        self.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, top as u16);
+
+        let usable_space = (dbHeader.pageSize - dbHeader.pageReservedSpace as u16) as usize;
+        assert!(top + amount <= usable_space);
+        top as u16
+    }
+
+    fn find_free_cell(&self, db_header: Ref<DbHeader>, amount: usize) -> usize {
+        // NOTE: freelist is in ascending order of keys and pc
+        // unuse_space is reserved bytes at the end of page, therefore we must substract from maxpc
+        let mut pc = self.firstFreeBlockPos() as usize;
+
+        let buf = self.asMutSlice();
+
+        let usable_space = (db_header.pageSize - db_header.pageReservedSpace as u16) as usize;
+        let maxpc = usable_space - amount;
+        let mut found = false;
+        while pc <= maxpc {
+            let next = u16::from_be_bytes(buf[pc..pc + 2].try_into().unwrap());
+            let size = u16::from_be_bytes(buf[pc + 2..pc + 4].try_into().unwrap());
+            if amount <= size as usize {
+                found = true;
+                break;
+            }
+            pc = next as usize;
+        }
+        if !found {
+            0
+        } else {
+            pc
+        }
+    }
+
+    fn defragment_page(&self, db_header: Ref<DbHeader>) {
+        let cloned_page = self.clone();
+        // TODO(pere): usable space should include offset probably
+        let usable_space = (db_header.pageSize - db_header.pageReservedSpace as u16) as u64;
+        let mut cbrk = usable_space;
+
+        // TODO: implement fast algorithm
+
+        let last_cell = usable_space - 4;
+        let first_cell = {
+            let (start, end) = cloned_page.cell_get_raw_pointer_region();
+            start + end
+        };
+
+        if cloned_page.cellCount() > 0 {
+            let page_type = self.getPageType();
+            let read_buf = cloned_page.asMutSlice();
+            let write_buf = self.asMutSlice();
+
+            for i in 0..cloned_page.cellCount() {
+                let cell_offset = self.offset + 8;
+                let cell_idx = cell_offset + i * 2;
+
+                let pc = u16::from_be_bytes([read_buf[cell_idx], read_buf[cell_idx + 1]]) as u64;
+                if pc > last_cell {
+                    unimplemented!("corrupted page");
+                }
+
+                assert!(pc <= last_cell);
+
+                let size = match page_type {
+                    PageType::TableInterior => {
+                        let (_, nr_key) = match readVarInt(&read_buf[pc as usize..]) {
+                            Ok(v) => v,
+                            Err(_) => todo!("error while parsing varint from cell, probably treat this as corruption?"),
+                        };
+                        4 + nr_key as u64
+                    }
+                    PageType::TableLeaf => {
+                        let (payload_size, nr_payload) = match readVarInt(&read_buf[pc as usize..]) {
+                            Ok(v) => v,
+                            Err(_) => todo!("error while parsing varint from cell, probably treat this as corruption?"),
+                        };
+                        let (_, nr_key) = match readVarInt(&read_buf[pc as usize + nr_payload..]) {
+                            Ok(v) => v,
+                            Err(_) => todo!("error while parsing varint from cell, probably treat this as corruption?"),
+                        };
+                        // TODO: add overflow page calculation
+                        payload_size + nr_payload as u64 + nr_key as u64
+                    }
+                    PageType::IndexInterior => todo!(),
+                    PageType::IndexLeaf => todo!(),
+                };
+                cbrk -= size;
+                if cbrk < first_cell as u64 || pc + size > usable_space {
+                    todo!("corrupt");
+                }
+                assert!(cbrk + size <= usable_space && cbrk >= first_cell as u64);
+                // set new pointer
+                write_buf[cell_idx..cell_idx + 2].copy_from_slice(&(cbrk as u16).to_be_bytes());
+                // copy payload
+                write_buf[cbrk as usize..cbrk as usize + size as usize].copy_from_slice(&read_buf[pc as usize..pc as usize + size as usize]);
+            }
+        }
+
+        // assert!( nfree >= 0 );
+        // if( data[hdr+7]+cbrk-iCellFirst!=pPage->nFree ){
+        //   return SQLITE_CORRUPT_PAGE(pPage);
+        // }
+        assert!(cbrk >= first_cell as u64);
+        let write_buf = self.asMutSlice();
+
+        // set new first byte of cell content
+        self.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, cbrk as u16);
+        // set free block to 0, unused spaced can be retrieved from gap between cell pointer end and content start
+        self.write_u16(page::PAGE_HEADER_OFFSET_FREE_BLOCK, 0);
+        // set unused space to 0
+        let first_cell = cloned_page.cellContentAreaPos() as u64;
+        assert!(first_cell <= cbrk);
+        write_buf[first_cell as usize..cbrk as usize].fill(0);
     }
 }
 

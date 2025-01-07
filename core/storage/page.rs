@@ -225,12 +225,18 @@ impl Pager {
 
         let pageCacheKey = PageCacheKey::new(pageId, Some(self.wal.borrow().getMaxFrameId()));
 
+        if let Some(page) = pageCache.get(&pageCacheKey) {
+            page.clear_locked();
+            return Ok(page.clone());
+        }
 
         let page = Arc::new(Page::new(pageId));
 
         page.setLocked();
 
         // 到wal读取
+        // wal的getLatestFrameIdContainsPageId 都是cache读取的 要是重启了且wal的threshold>1便读不到了
+        // 目前只能设置wal的threshold 1
         if let Some(frameId) = self.wal.borrow().getLatestFrameIdContainsPageId(pageId as u64)? {
             self.wal.borrow().readFrame(frameId, page.clone(), self.bufferPool.clone())?;
 
@@ -240,11 +246,6 @@ impl Pager {
             pageCache.insert(pageCacheKey, page.clone());
 
             return Ok(page);
-        }
-
-        if let Some(page) = pageCache.get(&pageCacheKey) {
-            page.clear_locked();
-            return Ok(page.clone());
         }
 
         sqlite3_ondisk::beginReadPage(self.storage.clone(),
@@ -261,7 +262,7 @@ impl Pager {
     /// Loads pages if not loaded
     pub fn load_page(&self, page: PageArc) -> Result<()> {
         let id = page.getMutInner().pageId;
-        trace!("load_page(page_idx = {})", id);
+
         let mut page_cache = self.pageCache.write().unwrap();
         page.setLocked();
         let page_key = PageCacheKey::new(id, Some(self.wal.borrow().getMaxFrameId()));

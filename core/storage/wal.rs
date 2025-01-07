@@ -25,7 +25,6 @@ pub const WAL_FRAME_HEADER_SIZE: usize = 24;
 pub const WAL_MAGIC_LE: u32 = 0x377f0682;
 pub const WAL_MAGIC_BE: u32 = 0x377f0683;
 
-/// Write-ahead log (WAL).
 pub trait Wal {
     fn beginReadTx(&mut self) -> Result<()>;
     fn endReadTx(&self) -> Result<()>;
@@ -33,7 +32,6 @@ pub trait Wal {
     fn beginWriteTx(&mut self) -> Result<()>;
     fn endWriteTx(&self) -> Result<()>;
 
-    /// Find the latest frame containing a page.
     fn getLatestFrameIdContainsPageId(&self, pageId: u64) -> Result<Option<u64>>;
 
     /// Read a frame from the WAL.

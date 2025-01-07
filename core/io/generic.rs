@@ -66,12 +66,10 @@ impl File for GenericFile {
         Ok(())
     }
 
-    fn pwrite(
-        &self,
-        pos: usize,
-        buffer: Rc<RefCell<crate::Buffer>>,
-        c: Rc<CompletionEnum>,
-    ) -> Result<()> {
+    fn pwrite(&self,
+              pos: usize,
+              buffer: Rc<RefCell<crate::Buffer>>,
+              c: Rc<CompletionEnum>) -> Result<()> {
         let mut file = self.file.borrow_mut();
         file.seek(std::io::SeekFrom::Start(pos as u64))?;
         let buf = buffer.borrow();

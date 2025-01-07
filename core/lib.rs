@@ -3,8 +3,6 @@
 mod error;
 mod function;
 mod io;
-#[cfg(feature = "json")]
-mod json;
 mod pseudo;
 mod schema;
 mod storage;

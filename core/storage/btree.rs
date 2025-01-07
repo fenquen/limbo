@@ -759,9 +759,9 @@ impl BTreeCursor {
 
     //// insert to position and shift other pointers
     fn insertIntoCell(&self, pageContent: &mut PageContent, payload: &[u8], cellIndex: usize) {
-        let free = pageContent.computeFreeSpace(RefCell::borrow(&self.dbHeader));
+        let pageFreeSpace = pageContent.computeFreeSpace(RefCell::borrow(&self.dbHeader));
 
-        if payload.len() + 2 > (free as usize) {
+        if payload.len() + page::POINTER_CELL_BYTE_LEN > (pageFreeSpace as usize) {
             pageContent.overflowCells.push(OverflowCell {
                 index: cellIndex,
                 payload: Pin::new(Vec::from(payload)),
@@ -771,7 +771,7 @@ impl BTreeCursor {
         }
 
         // TODO: insert into cell payload in internal page
-        let pc = self.allocate_cell_space(pageContent, payload.len());
+        let pc = pageContent.allocateCellSpace(&self.dbHeader, payload.len());
         let buf = pageContent.asMutSlice();
 
         // copy data
@@ -1231,121 +1231,6 @@ impl BTreeCursor {
         page
     }
 
-    /// Allocate space for a cell on a page.
-    fn allocate_cell_space(&self, pageContent: &PageContent, amount: usize) -> u16 {
-        let (cell_offset, _) = pageContent.cell_get_raw_pointer_region();
-        let gap = cell_offset + 2 * pageContent.cellCount();
-        let mut top = pageContent.cellContentAreaPos() as usize;
-
-        // there are free blocks and enough space
-        if pageContent.firstFreeBlockPos() != 0 && gap + 2 <= top {
-            // find slot
-            let db_header = RefCell::borrow(&self.dbHeader);
-            let pc = find_free_cell(pageContent, db_header, amount);
-            if pc != 0 {
-                return pc as u16;
-            }
-            /* fall through, we might need to defragment */
-        }
-
-        if gap + 2 + amount > top {
-            // defragment
-            self.defragment_page(pageContent, RefCell::borrow(&self.dbHeader));
-            top = pageContent.read_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT) as usize;
-        }
-
-        let db_header = RefCell::borrow(&self.dbHeader);
-        top -= amount;
-
-        pageContent.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, top as u16);
-
-        let usable_space = (db_header.pageSize - db_header.pageReservedSpace as u16) as usize;
-        assert!(top + amount <= usable_space);
-        top as u16
-    }
-
-    fn defragment_page(&self, page: &PageContent, db_header: Ref<DbHeader>) {
-        let cloned_page = page.clone();
-        // TODO(pere): usable space should include offset probably
-        let usable_space = (db_header.pageSize - db_header.pageReservedSpace as u16) as u64;
-        let mut cbrk = usable_space;
-
-        // TODO: implement fast algorithm
-
-        let last_cell = usable_space - 4;
-        let first_cell = {
-            let (start, end) = cloned_page.cell_get_raw_pointer_region();
-            start + end
-        };
-
-        if cloned_page.cellCount() > 0 {
-            let page_type = page.getPageType();
-            let read_buf = cloned_page.asMutSlice();
-            let write_buf = page.asMutSlice();
-
-            for i in 0..cloned_page.cellCount() {
-                let cell_offset = page.offset + 8;
-                let cell_idx = cell_offset + i * 2;
-
-                let pc = u16::from_be_bytes([read_buf[cell_idx], read_buf[cell_idx + 1]]) as u64;
-                if pc > last_cell {
-                    unimplemented!("corrupted page");
-                }
-
-                assert!(pc <= last_cell);
-
-                let size = match page_type {
-                    PageType::TableInterior => {
-                        let (_, nr_key) = match readVarInt(&read_buf[pc as usize..]) {
-                            Ok(v) => v,
-                            Err(_) => todo!("error while parsing varint from cell, probably treat this as corruption?"),
-                        };
-                        4 + nr_key as u64
-                    }
-                    PageType::TableLeaf => {
-                        let (payload_size, nr_payload) = match readVarInt(&read_buf[pc as usize..]) {
-                            Ok(v) => v,
-                            Err(_) => todo!("error while parsing varint from cell, probably treat this as corruption?"),
-                        };
-                        let (_, nr_key) = match readVarInt(&read_buf[pc as usize + nr_payload..]) {
-                            Ok(v) => v,
-                            Err(_) => todo!("error while parsing varint from cell, probably treat this as corruption?"),
-                        };
-                        // TODO: add overflow page calculation
-                        payload_size + nr_payload as u64 + nr_key as u64
-                    }
-                    PageType::IndexInterior => todo!(),
-                    PageType::IndexLeaf => todo!(),
-                };
-                cbrk -= size;
-                if cbrk < first_cell as u64 || pc + size > usable_space {
-                    todo!("corrupt");
-                }
-                assert!(cbrk + size <= usable_space && cbrk >= first_cell as u64);
-                // set new pointer
-                write_buf[cell_idx..cell_idx + 2].copy_from_slice(&(cbrk as u16).to_be_bytes());
-                // copy payload
-                write_buf[cbrk as usize..cbrk as usize + size as usize].copy_from_slice(&read_buf[pc as usize..pc as usize + size as usize]);
-            }
-        }
-
-        // assert!( nfree >= 0 );
-        // if( data[hdr+7]+cbrk-iCellFirst!=pPage->nFree ){
-        //   return SQLITE_CORRUPT_PAGE(pPage);
-        // }
-        assert!(cbrk >= first_cell as u64);
-        let write_buf = page.asMutSlice();
-
-        // set new first byte of cell content
-        page.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, cbrk as u16);
-        // set free block to 0, unused spaced can be retrieved from gap between cell pointer end and content start
-        page.write_u16(page::PAGE_HEADER_OFFSET_FREE_BLOCK, 0);
-        // set unused space to 0
-        let first_cell = cloned_page.cellContentAreaPos() as u64;
-        assert!(first_cell <= cbrk);
-        write_buf[first_cell as usize..cbrk as usize].fill(0);
-    }
-
     fn fillCellPayload(&self,
                        pageType: PageType,
                        key: Option<u64>,
@@ -1573,32 +1458,6 @@ enum WriteState {
     BalanceGetParentPage,
     BalanceMoveUp,
     Finish,
-}
-
-fn find_free_cell(page_ref: &PageContent, db_header: Ref<DbHeader>, amount: usize) -> usize {
-    // NOTE: freelist is in ascending order of keys and pc
-    // unuse_space is reserved bytes at the end of page, therefore we must substract from maxpc
-    let mut pc = page_ref.firstFreeBlockPos() as usize;
-
-    let buf = page_ref.asMutSlice();
-
-    let usable_space = (db_header.pageSize - db_header.pageReservedSpace as u16) as usize;
-    let maxpc = usable_space - amount;
-    let mut found = false;
-    while pc <= maxpc {
-        let next = u16::from_be_bytes(buf[pc..pc + 2].try_into().unwrap());
-        let size = u16::from_be_bytes(buf[pc + 2..pc + 4].try_into().unwrap());
-        if amount <= size as usize {
-            found = true;
-            break;
-        }
-        pc = next as usize;
-    }
-    if !found {
-        0
-    } else {
-        pc
-    }
 }
 
 fn to_static_buf(buf: &[u8]) -> &'static [u8] {

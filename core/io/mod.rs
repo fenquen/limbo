@@ -163,12 +163,12 @@ impl Buffer {
 }
 
 cfg_block! {
-   // #[cfg(target_os = "linux")] {
-  //      mod linux;
-  //      pub use linux::LinuxIO as PlatformIO;
-  //  }
+    #[cfg(target_os = "linux")] {
+        mod linux;
+        pub use linux::LinuxIO as PlatformIO;
+    }
 
-    #[cfg(not(any(target_os = "windows")))] {
+    #[cfg(not(any(target_os = "linux")))] {
         mod generic;
         pub use generic::GenericIO as PlatformIO;
     }

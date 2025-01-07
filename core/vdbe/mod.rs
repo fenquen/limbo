@@ -33,8 +33,6 @@ use crate::types::{
     AggContext, Cursor, CursorResult, OwnedRecord, OwnedValue, Record, SeekKey, SeekOp,
 };
 use crate::util::parse_schema_rows;
-#[cfg(feature = "json")]
-use crate::{function::JsonFunc, json::get_json};
 use crate::{Conn, Result, TransactionState};
 use crate::{Rows, DATABASE_VERSION};
 
@@ -59,16 +57,12 @@ pub type PageIdx = usize;
 #[derive(Debug)]
 pub enum Func {
     Scalar(ScalarFunc),
-    #[cfg(feature = "json")]
-    Json(JsonFunc),
 }
 
 impl Display for Func {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let str = match self {
             Func::Scalar(scalar_func) => scalar_func.to_string(),
-            #[cfg(feature = "json")]
-            Func::Json(json_func) => json_func.to_string(),
         };
         write!(f, "{}", str)
     }
@@ -2193,15 +2187,6 @@ impl Program {
                 } => {
                     let arg_count = func.arg_count;
                     match &func.func {
-                        #[cfg(feature = "json")]
-                        crate::function::Func::Json(JsonFunc::Json) => {
-                            let json_value = &programState.registers[*start_reg];
-                            let json_str = get_json(json_value);
-                            match json_str {
-                                Ok(json) => programState.registers[*dest] = json,
-                                Err(e) => return Err(e),
-                            }
-                        }
                         crate::function::Func::Scalar(scalar_func) => match scalar_func {
                             ScalarFunc::Cast => {
                                 assert!(arg_count == 2);
