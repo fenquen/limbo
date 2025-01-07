@@ -24,14 +24,12 @@ pub enum Val {
 
 pub fn get_json(json_value: &OwnedValue) -> crate::Result<OwnedValue> {
     match json_value {
-        OwnedValue::Text(ref t) => match crate::json::from_str::<Val>(t) {
+        OwnedValue::Text(ref t) => match from_str::<Val>(t) {
             Ok(json) => {
-                let json = crate::json::to_string(&json).unwrap();
+                let json = to_string(&json).unwrap();
                 Ok(OwnedValue::Text(Rc::new(json)))
             }
-            Err(_) => {
-                crate::bail_parse_error!("malformed JSON")
-            }
+            Err(_) => crate::bail_parse_error!("malformed JSON"),
         },
         OwnedValue::Blob(b) => {
             if let Ok(json) = jsonb::from_slice(b) {

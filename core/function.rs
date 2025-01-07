@@ -10,12 +10,10 @@ pub enum JsonFunc {
 #[cfg(feature = "json")]
 impl Display for JsonFunc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                JsonFunc::Json => "json".to_string(),
-            }
+        write!(f, "{}",
+               match self {
+                   JsonFunc::Json => "json".to_string(),
+               }
         )
     }
 }

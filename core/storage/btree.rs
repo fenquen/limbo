@@ -783,10 +783,8 @@ impl BTreeCursor {
         // move previous pointers forward and insert new pointer there
         let n_cells_forward = 2 * (pageContent.cellCount() - cellIndex);
         if n_cells_forward > 0 {
-            buf.copy_within(
-                pointer_area_pc_by_idx..pointer_area_pc_by_idx + n_cells_forward,
-                pointer_area_pc_by_idx + 2,
-            );
+            buf.copy_within(pointer_area_pc_by_idx..pointer_area_pc_by_idx + n_cells_forward,
+                            pointer_area_pc_by_idx + 2);
         }
         pageContent.write_u16(pointer_area_pc_by_idx - pageContent.offset, pc);
 

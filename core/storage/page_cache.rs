@@ -61,7 +61,7 @@ impl DumbLruPageCache {
 
     pub fn insert(&mut self, key: PageCacheKey, value: PageArc) {
         self._delete(key.clone(), false);
-        debug!("cache_insert(key={:?})", key);
+
         let mut entry = Box::new(PageCacheEntry {
             key: key.clone(),
             next: None,
@@ -83,7 +83,6 @@ impl DumbLruPageCache {
     }
 
     pub fn _delete(&mut self, key: PageCacheKey, clean_page: bool) {
-        debug!("cache_delete(key={:?}, clean={})", key, clean_page);
         let ptr = self.map.borrow_mut().remove(&key);
         if ptr.is_none() {
             return;
@@ -103,7 +102,6 @@ impl DumbLruPageCache {
     }
 
     pub fn get(&mut self, key: &PageCacheKey) -> Option<PageArc> {
-        debug!("cache_get(key={:?})", key);
         let ptr = self.get_ptr(key);
         ptr?;
         let ptr = unsafe { ptr.unwrap().as_mut() };
@@ -142,9 +140,7 @@ impl DumbLruPageCache {
         match (prev, next) {
             (None, None) => {}
             (None, Some(_)) => todo!(),
-            (Some(p), None) => {
-                self.tail = RefCell::new(Some(p));
-            }
+            (Some(p), None) => self.tail = RefCell::new(Some(p)),
             (Some(mut p), Some(mut n)) => unsafe {
                 let p_mut = p.as_mut();
                 p_mut.next = Some(n);

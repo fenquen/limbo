@@ -155,15 +155,14 @@ pub fn maybeInitDatabaseFile(file: &Rc<dyn File>, io: &Arc<dyn IO>) -> Result<()
     // sqlite文件的打头的100byte是database header
     let dbHeader = DbHeader::default();
 
-    let firstPage =
-        page::allocatePage(1, &Rc::new(BufferPool::new(dbHeader.pageSize as usize)), DB_HEADER_SIZE);
+    let firstPage = page::allocatePage(1, &Rc::new(BufferPool::new(dbHeader.pageSize as usize)), DB_HEADER_SIZE);
 
     {
         // Create the sqlite_schema table, for this we just need to create the btree page
         // for the first page of the database which is basically like any other btree page
         // but with a 100 byte offset, so we just init the page so that sqlite understands
         // this is a correct page.
-        firstPage.init( PageType::TableLeaf, &dbHeader, DB_HEADER_SIZE);
+        firstPage.init(PageType::TableLeaf, &dbHeader, DB_HEADER_SIZE);
 
         let pageContent = firstPage.getMutInner().pageContent.as_mut().unwrap();
 
@@ -208,7 +207,6 @@ pub struct Conn {
 impl Conn {
     pub fn prepare(self: &Rc<Conn>, sql: impl Into<String>) -> Result<Statement> {
         let sql = sql.into();
-        trace!("Preparing: {}", sql);
         let mut parser = Parser::new(sql.as_bytes());
         let cmd = parser.next()?;
         if let Some(cmd) = cmd {
@@ -223,8 +221,7 @@ impl Conn {
                     )?);
                     Ok(Statement::new(program, self.pager.clone()))
                 }
-                Cmd::Explain(_stmt) => todo!(),
-                Cmd::ExplainQueryPlan(_stmt) => todo!(),
+                _ => todo!(),
             }
         } else {
             todo!()
@@ -233,7 +230,6 @@ impl Conn {
 
     pub fn query(self: &Rc<Conn>, sql: impl Into<String>) -> Result<Option<Rows>> {
         let sql = sql.into();
-        trace!("Querying: {}", sql);
 
         let mut parser = Parser::new(sql.as_bytes());
 
@@ -332,12 +328,8 @@ impl Conn {
         loop {
             // TODO: make this async?
             match self.pager.checkpoint()? {
-                CheckpointStatus::Done => {
-                    return Ok(());
-                }
-                CheckpointStatus::IO => {
-                    self.pager.io.runOnce()?;
-                }
+                CheckpointStatus::Done => return Ok(()),
+                CheckpointStatus::IO => self.pager.io.runOnce()?,
             };
         }
     }
@@ -368,8 +360,7 @@ impl Statement {
     }
 
     pub fn step(&mut self) -> Result<RowResult<'_>> {
-        let result = self.program.step(&mut self.state, self.pager.clone())?;
-        match result {
+        match self.program.step(&mut self.state, self.pager.clone())? {
             vdbe::StepResult::Row(row) => Ok(RowResult::Row(Row { values: row.values })),
             vdbe::StepResult::IO => Ok(RowResult::IO),
             vdbe::StepResult::Done => Ok(RowResult::Done),
@@ -395,7 +386,7 @@ pub struct Row<'a> {
 }
 
 impl<'a> Row<'a> {
-    pub fn get<T: crate::types::FromValue<'a> + 'a>(&self, idx: usize) -> Result<T> {
+    pub fn get<T: types::FromValue<'a> + 'a>(&self, idx: usize) -> Result<T> {
         let value = &self.values[idx];
         T::from_value(value)
     }
