@@ -221,16 +221,10 @@ pub fn exprs_are_equivalent(expr1: &Expr, expr2: &Expr) -> bool {
         (Expr::IsNull(expr1), Expr::IsNull(expr2)) => exprs_are_equivalent(expr1, expr2),
         (Expr::Literal(lit1), Expr::Literal(lit2)) => check_literal_equivalency(lit1, lit2),
         (Expr::Id(id1), Expr::Id(id2)) => check_ident_equivalency(&id1.0, &id2.0),
-        (Expr::Unary(op1, expr1), Expr::Unary(op2, expr2)) => {
-            op1 == op2 && exprs_are_equivalent(expr1, expr2)
-        }
+        (Expr::Unary(op1, expr1), Expr::Unary(op2, expr2)) => op1 == op2 && exprs_are_equivalent(expr1, expr2),
         (Expr::Variable(var1), Expr::Variable(var2)) => var1 == var2,
         (Expr::Parenthesized(exprs1), Expr::Parenthesized(exprs2)) => {
-            exprs1.len() == exprs2.len()
-                && exprs1
-                    .iter()
-                    .zip(exprs2)
-                    .all(|(e1, e2)| exprs_are_equivalent(e1, e2))
+            exprs1.len() == exprs2.len() && exprs1.iter().zip(exprs2).all(|(e1, e2)| exprs_are_equivalent(e1, e2))
         }
         (Expr::Parenthesized(exprs1), exprs2) | (exprs2, Expr::Parenthesized(exprs1)) => {
             exprs1.len() == 1 && exprs_are_equivalent(&exprs1[0], exprs2)
@@ -257,17 +251,10 @@ pub fn exprs_are_equivalent(expr1: &Expr, expr2: &Expr) -> bool {
         ) => {
             *not1 == *not2
                 && exprs_are_equivalent(lhs1, lhs2)
-                && rhs1
-                    .as_ref()
-                    .zip(rhs2.as_ref())
-                    .map(|(list1, list2)| {
+                && rhs1.as_ref().zip(rhs2.as_ref()).map(|(list1, list2)| {
                         list1.len() == list2.len()
-                            && list1
-                                .iter()
-                                .zip(list2)
-                                .all(|(e1, e2)| exprs_are_equivalent(e1, e2))
-                    })
-                    .unwrap_or(false)
+                            && list1.iter().zip(list2).all(|(e1, e2)| exprs_are_equivalent(e1, e2))
+                    }).unwrap_or(false)
         }
         // fall back to naive equality check
         _ => expr1 == expr2,

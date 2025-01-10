@@ -23,9 +23,6 @@ pub enum LimboError {
     LinuxIOError(String),
     #[error("Locking error: {0}")]
     LockingError(String),
-    #[cfg(target_os = "macos")]
-    #[error("I/O error: {0}")]
-    RustixIOError(#[from] rustix::io::Errno),
     #[error("Parse error: {0}")]
     ParseIntError(#[from] std::num::ParseIntError),
     #[error("Parse error: {0}")]

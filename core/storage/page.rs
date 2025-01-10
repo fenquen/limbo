@@ -20,7 +20,7 @@ pub const PAGE_HEADER_OFFSET_FREE_BLOCK: usize = 1;
 /// number of cells in the page -> u16
 pub const PAGE_HEADER_OFFSET_CELL_COUNT: usize = 3;
 /// pointer to first byte of cell allocated content from top -> u16
-pub const PAGE_HEADER_OFFSET_CELL_CONTENT: usize = 5;
+pub const PAGE_HEADER_OFFSET_CELL_CONTENT_START_POS: usize = 5;
 /// number of fragmented bytes -> u8
 pub const PAGE_HEADER_OFFSET_FRAGMENTED: usize = 7;
 /// if internal node, pointer right most pointer (saved separately from cells) -> u32
@@ -28,10 +28,10 @@ pub const PAGE_HEADER_OFFSET_RIGHTMOST: usize = 8;
 
 /// 非leaf特有
 pub const RIGHTMOST_CHILD_PAGE_INDEX_BYTE_LEN: usize = 4;
-
 pub const POINTER_CELL_BYTE_LEN: usize = 2;
-
+pub const PAGE_INDEX_OF_LEFT_CHILD_BYTE_LEN: usize = 4;
 pub const FRAGMENT_MAX_BYTE_LEN: usize = 3;
+pub const LEAF_PAGE_HEADER_BYTE_LEN: usize = 8;
 
 pub struct Page {
     pub pageInner: UnsafeCell<PageInner>,
@@ -76,7 +76,7 @@ impl Page {
 
         /// page的cell的data是在page的尾部写的
         let cellContentAreaStartPos = dbHeader.pageSize - dbHeader.pageReservedSpace as u16;
-        pageContent.write_u16(PAGE_HEADER_OFFSET_CELL_CONTENT, cellContentAreaStartPos);
+        pageContent.write_u16(PAGE_HEADER_OFFSET_CELL_CONTENT_START_POS, cellContentAreaStartPos);
 
         pageContent.write_u8(PAGE_HEADER_OFFSET_FRAGMENTED, 0);
         pageContent.write_u32(PAGE_HEADER_OFFSET_RIGHTMOST, 0);
@@ -267,9 +267,7 @@ impl Pager {
         page.setLocked();
         let page_key = PageCacheKey::new(id, Some(self.wal.borrow().getMaxFrameId()));
         if let Some(frame_id) = self.wal.borrow().getLatestFrameIdContainsPageId(id as u64)? {
-            self.wal
-                .borrow()
-                .readFrame(frame_id, page.clone(), self.bufferPool.clone())?;
+            self.wal.borrow().readFrame(frame_id, page.clone(), self.bufferPool.clone())?;
             {
                 page.set_uptodate();
             }
@@ -279,16 +277,17 @@ impl Pager {
             }
             return Ok(());
         }
-        sqlite3_ondisk::beginReadPage(
-            self.storage.clone(),
-            self.bufferPool.clone(),
-            page.clone(),
-            id,
-        )?;
+
+        sqlite3_ondisk::beginReadPage(self.storage.clone(),
+                                      self.bufferPool.clone(),
+                                      page.clone(),
+                                      id)?;
+
         // TODO(pere) ensure page is inserted
         if !page_cache.contains_key(&page_key) {
             page_cache.insert(page_key, page.clone());
         }
+
         Ok(())
     }
 
@@ -378,7 +377,6 @@ impl Pager {
     pub fn checkpoint(&self) -> Result<CheckpointStatus> {
         loop {
             let state = self.checkpoint_state.borrow().clone();
-            trace!("pager_checkpoint(state={:?})", state);
             match state {
                 CheckpointState::Checkpoint => {
                     let in_flight = self.checkpoint_inflight.clone();
@@ -391,25 +389,23 @@ impl Pager {
                 }
                 CheckpointState::SyncDbFile => {
                     sqlite3_ondisk::begin_sync(self.storage.clone(), self.syncing.clone())?;
-                    self.checkpoint_state
-                        .replace(CheckpointState::WaitSyncDbFile);
+                    self.checkpoint_state.replace(CheckpointState::WaitSyncDbFile);
                 }
                 CheckpointState::WaitSyncDbFile => {
                     if *self.syncing.borrow() {
                         return Ok(CheckpointStatus::IO);
                     } else {
-                        self.checkpoint_state
-                            .replace(CheckpointState::CheckpointDone);
+                        self.checkpoint_state.replace(CheckpointState::CheckpointDone);
                     }
                 }
                 CheckpointState::CheckpointDone => {
                     let in_flight = self.checkpoint_inflight.clone();
-                    if *in_flight.borrow() > 0 {
-                        return Ok(CheckpointStatus::IO);
+                    return if *in_flight.borrow() > 0 {
+                        Ok(CheckpointStatus::IO)
                     } else {
                         self.checkpoint_state.replace(CheckpointState::Checkpoint);
-                        return Ok(CheckpointStatus::Done);
-                    }
+                        Ok(CheckpointStatus::Done)
+                    };
                 }
             }
         }
@@ -418,17 +414,9 @@ impl Pager {
     // WARN: used for testing purposes
     pub fn clear_page_cache(&self) {
         loop {
-            match self
-                .wal
-                .borrow_mut()
-                .checkpoint(self, Rc::new(RefCell::new(0)))
-            {
-                Ok(CheckpointStatus::IO) => {
-                    self.io.runOnce();
-                }
-                Ok(CheckpointStatus::Done) => {
-                    break;
-                }
+            match self.wal.borrow_mut().checkpoint(self, Rc::new(RefCell::new(0))) {
+                Ok(CheckpointStatus::IO) => { self.io.runOnce(); }
+                Ok(CheckpointStatus::Done) => break,
                 Err(err) => panic!("error while clearing cache {}", err),
             }
         }

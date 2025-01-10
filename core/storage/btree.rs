@@ -742,10 +742,10 @@ impl BTreeCursor {
                         pageContent.overflowCells.len()
                     };
 
-                    if overflowCellCount > 0 {
-                        self.writeInfo.writeState = WriteState::BalanceStart;
+                    self.writeInfo.writeState = if overflowCellCount > 0 {
+                        WriteState::BalanceStart
                     } else {
-                        self.writeInfo.writeState = WriteState::Finish;
+                        WriteState::Finish
                     }
                 }
                 WriteState::BalanceStart | WriteState::BalanceMoveUp | WriteState::BalanceGetParentPage => return_if_io!(self.balanceLeaf()),
@@ -771,29 +771,29 @@ impl BTreeCursor {
         }
 
         // TODO: insert into cell payload in internal page
-        let pc = pageContent.allocateCellSpace(&self.dbHeader, payload.len());
+        let dataCellPos = pageContent.allocateCellSpace(&self.dbHeader, payload.len());
         let buf = pageContent.asMutSlice();
 
-        // copy data
-        buf[pc as usize..pc as usize + payload.len()].copy_from_slice(payload);
+        // copy playload to buf
+        buf[dataCellPos as usize..dataCellPos as usize + payload.len()].copy_from_slice(payload);
+
         //  memmove(pIns+2, pIns, 2*(pPage->nCell - i));
-        let (pointer_area_pc_by_idx, _) = pageContent.cell_get_raw_pointer_region();
-        let pointer_area_pc_by_idx = pointer_area_pc_by_idx + (2 * cellIndex);
+        let (pointerCellsStartPos, _) = pageContent.getPointerCellsStartPos();
+        let pointerCellStartPos = pointerCellsStartPos + (page::POINTER_CELL_BYTE_LEN * cellIndex);
 
         // move previous pointers forward and insert new pointer there
-        let n_cells_forward = 2 * (pageContent.cellCount() - cellIndex);
+        let n_cells_forward = page::POINTER_CELL_BYTE_LEN * (pageContent.cellCount() - cellIndex);
         if n_cells_forward > 0 {
-            buf.copy_within(pointer_area_pc_by_idx..pointer_area_pc_by_idx + n_cells_forward,
-                            pointer_area_pc_by_idx + 2);
+            buf.copy_within(pointerCellStartPos..pointerCellStartPos + n_cells_forward,
+                            pointerCellStartPos + page::POINTER_CELL_BYTE_LEN);
         }
-        pageContent.write_u16(pointer_area_pc_by_idx - pageContent.offset, pc);
+        pageContent.write_u16(pointerCellStartPos - pageContent.offset, dataCellPos);
 
-        // update first byte of content area
-        pageContent.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, pc);
+        // 变更 CELL_CONTENT_START_POS
+        pageContent.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT_START_POS, dataCellPos);
 
-        // update cell count
-        let new_n_cells = (pageContent.cellCount() + 1) as u16;
-        pageContent.write_u16(page::PAGE_HEADER_OFFSET_CELL_COUNT, new_n_cells);
+        // 变更 cell count
+        pageContent.write_u16(page::PAGE_HEADER_OFFSET_CELL_COUNT, (pageContent.cellCount() + 1) as u16);
     }
 
     fn free_cell_range(&self, page: &mut PageContent, offset: u16, len: u16) {
@@ -814,10 +814,10 @@ impl BTreeCursor {
             return;
         }
 
-        if offset <= page.cellContentAreaPos() {
+        if offset <= page.cellContentAreaStartPos() {
             // extend boundary of content area
             page.write_u16(page::PAGE_HEADER_OFFSET_FREE_BLOCK, page.firstFreeBlockPos());
-            page.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, offset + len);
+            page.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT_START_POS, offset + len);
             return;
         }
 
@@ -868,20 +868,19 @@ impl BTreeCursor {
     /// It will try to split the page in half by keys not by content.
     /// Sqlite tries to have a page at least 40% full.
     fn balanceLeaf(&mut self) -> Result<CursorResult<()>> {
-        let state = &self.writeInfo.writeState;
-        match state {
+        match self.writeInfo.writeState {
             WriteState::BalanceStart => {
                 // drop divider cells and find right pointer
                 // NOTE: since we are doing a simple split we only finding the pointer we want to update (right pointer).
                 // Right pointer means cell that points to the last page, as we don't really want to drop this one. This one
                 // can be a "rightmost pointer" or a "cell".
                 // we always asumme there is a parent
-                let current_page = self.pageStack.top();
+                let curPage = self.pageStack.top();
+
                 {
-                    // check if we don't need to balance
-                    // don't continue if there are no overflow cells
-                    let page = current_page.getMutInner().pageContent.as_mut().unwrap();
-                    if page.overflowCells.is_empty() {
+                    // check if we don't need to balance ,don't continue if there are no overflow cells
+                    let curPageContent = curPage.getMutInner().pageContent.as_mut().unwrap();
+                    if curPageContent.overflowCells.is_empty() {
                         self.writeInfo.writeState = WriteState::Finish;
                         return Ok(CursorResult::Ok(()));
                     }
@@ -895,46 +894,39 @@ impl BTreeCursor {
                 // Copy of page used to reference cell bytes.
                 // This needs to be saved somewhere safe so taht references still point to here,
                 // this will be store in write_info below
-                let page_copy = current_page.getMutInner().pageContent.as_ref().unwrap().clone();
+                let curPageContentClone = curPage.getMutInner().pageContent.as_ref().unwrap().clone();
 
                 // In memory in order copy of all cells in pages we want to balance. For now let's do a 2 page split.
                 // Right pointer in interior cells should be converted to regular cells if more than 2 pages are used for balancing.
                 let mut scratch_cells = self.writeInfo.scratch_cells.borrow_mut();
                 scratch_cells.clear();
 
-                for cell_idx in 0..page_copy.cellCount() {
-                    let (start, len) = page_copy.cell_get_raw_region(
-                        cell_idx,
-                        self.maxLocal(page_copy.getPageType()),
-                        self.minLocal(),
-                        self.pageUsableSpace(),
-                    );
-                    let buf = page_copy.asMutSlice();
+                for cell_idx in 0..curPageContentClone.cellCount() {
+                    let (start, len) =
+                        curPageContentClone.cell_get_raw_region(cell_idx,
+                                                                self.maxLocal(curPageContentClone.getPageType()),
+                                                                self.minLocal(),
+                                                                self.pageUsableSpace());
+                    let buf = curPageContentClone.asMutSlice();
                     scratch_cells.push(to_static_buf(&buf[start..start + len]));
                 }
-                for overflow_cell in &page_copy.overflowCells {
+                for overflow_cell in &curPageContentClone.overflowCells {
                     scratch_cells.insert(overflow_cell.index, to_static_buf(&overflow_cell.payload));
                 }
 
-                *self.writeInfo.rightmost_pointer.borrow_mut() = page_copy.rightmostChildPageIndex();
+                *self.writeInfo.rightmost_pointer.borrow_mut() = curPageContentClone.rightmostChildPageIndex();
 
-                self.writeInfo.page_copy.replace(Some(page_copy));
+                self.writeInfo.page_copy.replace(Some(curPageContentClone));
 
                 // allocate new pages and move cells to those new pages split procedure
-                let page = current_page.getMutInner().pageContent.as_mut().unwrap();
+                let page = curPage.getMutInner().pageContent.as_mut().unwrap();
                 assert!(matches!(page.getPageType(),PageType::TableLeaf | PageType::TableInterior), "indexes still not supported ");
 
                 let right_page = self.allocatePage(page.getPageType(), 0);
 
                 self.writeInfo.new_pages.borrow_mut().clear();
-                self.writeInfo
-                    .new_pages
-                    .borrow_mut()
-                    .push(current_page.clone());
-                self.writeInfo
-                    .new_pages
-                    .borrow_mut()
-                    .push(right_page.clone());
+                self.writeInfo.new_pages.borrow_mut().push(curPage.clone());
+                self.writeInfo.new_pages.borrow_mut().push(right_page.clone());
 
 
                 self.writeInfo.writeState = WriteState::BalanceGetParentPage;
@@ -984,13 +976,13 @@ impl BTreeCursor {
                         BTreeCell::TableInteriorCell(interior) => interior.leftChildPageIndex as usize == current_idx,
                         _ => unreachable!("Parent should always be a "),
                     };
+
                     if found {
-                        let (start, _len) = parent_contents.cell_get_raw_region(
-                            cell_idx,
-                            self.maxLocal(page_type.clone()),
-                            self.minLocal(),
-                            self.pageUsableSpace(),
-                        );
+                        let (start, _len) =
+                            parent_contents.cell_get_raw_region(cell_idx,
+                                                                self.maxLocal(page_type.clone()),
+                                                                self.minLocal(),
+                                                                self.pageUsableSpace());
                         right_pointer = start;
                         break;
                     }
@@ -1008,9 +1000,8 @@ impl BTreeCursor {
                     contents.write_u16(page::PAGE_HEADER_OFFSET_CELL_COUNT, 0);
 
                     let db_header = RefCell::borrow(&self.dbHeader);
-                    let cell_content_area_start =
-                        db_header.pageSize - db_header.pageReservedSpace as u16;
-                    contents.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, cell_content_area_start);
+                    let cell_content_area_start = db_header.pageSize - db_header.pageReservedSpace as u16;
+                    contents.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT_START_POS, cell_content_area_start);
 
                     contents.write_u8(page::PAGE_HEADER_OFFSET_FRAGMENTED, 0);
                     if !contents.isLeaf() {
@@ -1076,8 +1067,7 @@ impl BTreeCursor {
                     // last page right most pointer points to previous right most pointer before splitting
                     let last_page = new_pages.last().unwrap();
                     let last_page_contents = last_page.getMutInner().pageContent.as_mut().unwrap();
-                    last_page_contents.write_u32(page::PAGE_HEADER_OFFSET_RIGHTMOST,
-                                                 self.writeInfo.rightmost_pointer.borrow().unwrap());
+                    last_page_contents.write_u32(page::PAGE_HEADER_OFFSET_RIGHTMOST, self.writeInfo.rightmost_pointer.borrow().unwrap());
                 }
 
                 // insert dividers in parent
@@ -1146,12 +1136,12 @@ impl BTreeCursor {
         /* todo: balance deeper, create child and copy contents of root there. Then split root */
         /* if we are in root page then we just need to create a new root and push key there */
 
-        let is_page_1 = {
+        let isFirstPage = {
             let current_root = self.pageStack.top();
             current_root.getMutInner().pageId == 1
         };
 
-        let offset = if is_page_1 { DB_HEADER_SIZE } else { 0 };
+        let offset = if isFirstPage { DB_HEADER_SIZE } else { 0 };
         let new_root_page = self.allocatePage(PageType::TableInterior, offset);
         {
             let current_root = self.pageStack.top();
@@ -1159,7 +1149,7 @@ impl BTreeCursor {
 
             let new_root_page_id = new_root_page.getMutInner().pageId;
             let new_root_page_contents = new_root_page.getMutInner().pageContent.as_mut().unwrap();
-            if is_page_1 {
+            if isFirstPage {
                 // Copy header
                 let current_root_buf = current_root_contents.asMutSlice();
                 let new_root_buf = new_root_page_contents.asMutSlice();
@@ -1182,10 +1172,10 @@ impl BTreeCursor {
                 // and header bytes
                 // Also change the offset of page
                 //
-                if is_page_1 {
+                if isFirstPage {
                     // Remove header from child and set offset to 0
                     let contents = child.getMutInner().pageContent.as_mut().unwrap();
-                    let (cell_pointer_offset, _) = contents.cell_get_raw_pointer_region();
+                    let (cell_pointer_offset, _) = contents.getPointerCellsStartPos();
                     // change cell pointers
                     for cell_idx in 0..contents.cellCount() {
                         let cell_pointer_offset = cell_pointer_offset + (2 * cell_idx) - offset;
@@ -1326,16 +1316,16 @@ impl BTreeCursor {
         (dbHeader.pageSize - dbHeader.pageReservedSpace as u16) as usize
     }
 
-    fn findCell(&self, page: &PageContent, intKey: u64) -> usize {
+    fn findCell(&self, pageContent: &PageContent, intKey: u64) -> usize {
         let mut cellIndex = 0;
 
-        let cellCount = page.cellCount();
+        let cellCount = pageContent.cellCount();
         while cellIndex < cellCount {
-            match page.getCell(cellIndex,
-                               self.pager.clone(),
-                               self.maxLocal(page.getPageType()),
-                               self.minLocal(),
-                               self.pageUsableSpace()).unwrap() {
+            match pageContent.getCell(cellIndex,
+                                      self.pager.clone(),
+                                      self.maxLocal(pageContent.getPageType()),
+                                      self.minLocal(),
+                                      self.pageUsableSpace()).unwrap() {
                 BTreeCell::TableLeafCell(cell) => {
                     if intKey <= cell.rowId {
                         break;
@@ -1451,7 +1441,7 @@ struct WriteInfo {
     page_copy: RefCell<Option<PageContent>>, // this holds the copy a of a page needed for buffer references
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 enum WriteState {
     Start,
     BalanceStart,

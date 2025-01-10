@@ -129,6 +129,13 @@ impl Default for DbHeader {
     }
 }
 
+impl DbHeader {
+    #[inline]
+    pub fn pageUsableSpace(&self) -> usize {
+        (self.pageSize - self.pageReservedSpace as u16) as usize
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 #[repr(C)]
 /// This helps with encoding because rust does not respect the order in structs, so in this case we want to keep the order
@@ -249,9 +256,7 @@ pub fn begin_write_database_header(header: &DbHeader, pager: &Pager) -> Result<(
         // finish_read_database_header(buf, header).unwrap();
     });
     let c = Rc::new(CompletionEnum::Write(WriteCompletion::new(write_complete)));
-    page_source
-        .writePage(0, buffer_to_copy.clone(), c)
-        .unwrap();
+    page_source.writePage(0, buffer_to_copy.clone(), c)?;
 
     Ok(())
 }
@@ -392,8 +397,8 @@ impl PageContent {
         self.read_u16(3) as usize
     }
 
-    pub fn cellContentAreaPos(&self) -> u16 {
-        self.read_u16(5)
+    pub fn cellContentAreaStartPos(&self) -> u16 {
+        self.read_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT_START_POS)
     }
 
     pub fn fragFreeByteCount(&self) -> u8 {
@@ -438,14 +443,15 @@ impl PageContent {
                       pageUsableSpace)
     }
 
-    pub fn cell_get_raw_pointer_region(&self) -> (usize, usize) {
-        let cell_start = match self.getPageType() {
+    pub fn getPointerCellsStartPos(&self) -> (usize, usize) {
+        let headerSize = match self.getPageType() {
             PageType::IndexInterior => 12,
             PageType::TableInterior => 12,
             PageType::IndexLeaf => 8,
             PageType::TableLeaf => 8,
         };
-        (self.offset + cell_start, self.cellCount() * 2)
+
+        (self.offset + headerSize, self.cellCount() * page::POINTER_CELL_BYTE_LEN)
     }
 
     /* Get region of a cell's payload */
@@ -527,10 +533,11 @@ impl PageContent {
         let pageUsableSpace = (dbHeader.pageSize - dbHeader.pageReservedSpace as u16) as usize;
 
         let cellContentAreaPos = {
-            let mut cellContentAreaPos = self.cellContentAreaPos();
+            let mut cellContentAreaPos = self.cellContentAreaStartPos();
             if cellContentAreaPos == 0 {
                 cellContentAreaPos = u16::MAX;
             }
+
             cellContentAreaPos
         };
 
@@ -585,145 +592,148 @@ impl PageContent {
         freeSpace as u16
     }
 
-    /// Allocate space for a cell on a page.
-    pub fn allocateCellSpace(&self, dbHeader: &Rc<RefCell<DbHeader>>, amount: usize) -> u16 {
-        let (cell_offset, _) = self.cell_get_raw_pointer_region();
-        let gapStartPos = cell_offset + page::POINTER_CELL_BYTE_LEN * self.cellCount();
 
-        let mut top = self.cellContentAreaPos() as usize;
+    /// 分配data cell是从page的末尾开始,函数返回末尾减去size后的pos
+    pub fn allocateCellSpace(&self, dbHeader: &Rc<RefCell<DbHeader>>, expectSize: usize) -> u16 {
+        let (cellStartPos, _) = self.getPointerCellsStartPos();
+        let gapStartPos = cellStartPos + page::POINTER_CELL_BYTE_LEN * self.cellCount();
+
+        let mut dataCellsStartPos = self.cellContentAreaStartPos() as usize;
 
         // there are free blocks and enough space
-        if self.firstFreeBlockPos() != 0 && gapStartPos + page::POINTER_CELL_BYTE_LEN <= top {
-            // find slot
-            let pc = self.find_free_cell(dbHeader.borrow(), amount);
-            if pc != 0 {
-                return pc as u16;
+        // 为什么说有enough space 单看这个表达式确实看不出来,因为这个函数allocateCellSpace 是在 确认了pageFreeSpace够了后调用的
+        if self.firstFreeBlockPos() != 0 && gapStartPos + page::POINTER_CELL_BYTE_LEN <= dataCellsStartPos {
+            // 搜寻是不是有足够大的free block
+            let (cellPos, found) = self.findFreeCell(dbHeader.borrow(), expectSize);
+            if found {
+                return cellPos as u16;
             }
-
-            // fall through, we might need to defragment
         }
 
-        if gapStartPos + 2 + amount > top {
-            self.defragment_page(dbHeader.borrow());
-            top = self.read_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT) as usize;
+        // [header][pointerCells][gap][dataCells]
+        // 意味着gap本身容不下 page::POINTER_CELL_BYTE_LEN + expectSize  需要dataCells部分defragment
+        if gapStartPos + page::POINTER_CELL_BYTE_LEN + expectSize > dataCellsStartPos {
+            self.defragment(dbHeader.borrow());
+            dataCellsStartPos = self.cellContentAreaStartPos() as usize;
         }
 
-        let dbHeader = dbHeader.borrow();
-        top -= amount;
+        dataCellsStartPos -= expectSize;
 
-        self.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, top as u16);
+        self.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT_START_POS, dataCellsStartPos as u16);
 
-        let usable_space = (dbHeader.pageSize - dbHeader.pageReservedSpace as u16) as usize;
-        assert!(top + amount <= usable_space);
-        top as u16
+        assert!(dataCellsStartPos + expectSize <= dbHeader.borrow().pageUsableSpace());
+
+        dataCellsStartPos as u16
     }
 
-    fn find_free_cell(&self, db_header: Ref<DbHeader>, amount: usize) -> usize {
-        // NOTE: freelist is in ascending order of keys and pc
-        // unuse_space is reserved bytes at the end of page, therefore we must substract from maxpc
-        let mut pc = self.firstFreeBlockPos() as usize;
+    fn findFreeCell(&self, dbHeader: Ref<DbHeader>, amount: usize) -> (usize, bool) {
+        let mut pos = self.firstFreeBlockPos() as usize;
 
         let buf = self.asMutSlice();
 
-        let usable_space = (db_header.pageSize - db_header.pageReservedSpace as u16) as usize;
-        let maxpc = usable_space - amount;
+        let maxPos = dbHeader.pageUsableSpace() - amount;
+
         let mut found = false;
-        while pc <= maxpc {
-            let next = u16::from_be_bytes(buf[pc..pc + 2].try_into().unwrap());
-            let size = u16::from_be_bytes(buf[pc + 2..pc + 4].try_into().unwrap());
-            if amount <= size as usize {
+        while pos <= maxPos {
+            let nextFreeBlockPos = u16::from_be_bytes(buf[pos..pos + 2].try_into().unwrap());
+            let freeBlockSize = u16::from_be_bytes(buf[pos + 2..pos + 4].try_into().unwrap());
+
+            if amount <= freeBlockSize as usize {
                 found = true;
                 break;
             }
-            pc = next as usize;
+
+            pos = nextFreeBlockPos as usize;
         }
+
         if !found {
-            0
+            (0, false)
         } else {
-            pc
+            (pos, true)
         }
     }
 
-    fn defragment_page(&self, db_header: Ref<DbHeader>) {
-        let cloned_page = self.clone();
+    /// 对page的dataCellRegion(cellContent)全量的重梳理排布
+    fn defragment(&self, dbHeader: Ref<DbHeader>) {
+        let pageContentOld = self.clone();
+
         // TODO(pere): usable space should include offset probably
-        let usable_space = (db_header.pageSize - db_header.pageReservedSpace as u16) as u64;
-        let mut cbrk = usable_space;
+        let pageUsableSpace = dbHeader.pageUsableSpace() as u64;
+        let mut dataCellsStartPosNew = pageUsableSpace;
 
-        // TODO: implement fast algorithm
+        let last_cell = pageUsableSpace - 4;
 
-        let last_cell = usable_space - 4;
-        let first_cell = {
-            let (start, end) = cloned_page.cell_get_raw_pointer_region();
-            start + end
+        let gapStartPos = {
+            let (pointerCellRegionStartPos, pointerCellRegionByteLen) = pageContentOld.getPointerCellsStartPos();
+            pointerCellRegionStartPos + pointerCellRegionByteLen
         };
 
-        if cloned_page.cellCount() > 0 {
-            let page_type = self.getPageType();
-            let read_buf = cloned_page.asMutSlice();
-            let write_buf = self.asMutSlice();
+        let bufNew = self.asMutSlice();
 
-            for i in 0..cloned_page.cellCount() {
-                let cell_offset = self.offset + 8;
-                let cell_idx = cell_offset + i * 2;
+        if pageContentOld.cellCount() > 0 {
+            let pageType = self.getPageType();
+            let bufOld = pageContentOld.asMutSlice();
 
-                let pc = u16::from_be_bytes([read_buf[cell_idx], read_buf[cell_idx + 1]]) as u64;
-                if pc > last_cell {
-                    unimplemented!("corrupted page");
-                }
+            for i in 0..pageContentOld.cellCount() {
+                let pointerCellPos = self.offset + page::LEAF_PAGE_HEADER_BYTE_LEN + i * page::POINTER_CELL_BYTE_LEN;
 
-                assert!(pc <= last_cell);
+                let dataCellPos = u16::from_be_bytes([bufOld[pointerCellPos], bufOld[pointerCellPos + 1]]) as u64;
+                assert!(dataCellPos <= last_cell);
 
-                let size = match page_type {
+                let size = match pageType {
                     PageType::TableInterior => {
-                        let (_, nr_key) = match readVarInt(&read_buf[pc as usize..]) {
+                        // fenquen 感觉它写错了 原来是readVarInt(&read_buf[pc as usize..])
+                        let (_, rowIdByteLen) = match readVarInt(&bufOld[dataCellPos as usize + page::LEAF_PAGE_HEADER_BYTE_LEN..]) {
                             Ok(v) => v,
                             Err(_) => todo!("error while parsing varint from cell, probably treat this as corruption?"),
                         };
-                        4 + nr_key as u64
+                        page::LEAF_PAGE_HEADER_BYTE_LEN as u64 + rowIdByteLen as u64
                     }
                     PageType::TableLeaf => {
-                        let (payload_size, nr_payload) = match readVarInt(&read_buf[pc as usize..]) {
+                        let (payloadSize, payloadSizeByteLen) = match readVarInt(&bufOld[dataCellPos as usize..]) {
                             Ok(v) => v,
                             Err(_) => todo!("error while parsing varint from cell, probably treat this as corruption?"),
                         };
-                        let (_, nr_key) = match readVarInt(&read_buf[pc as usize + nr_payload..]) {
+
+                        let (_, rowIdByteLen) = match readVarInt(&bufOld[dataCellPos as usize + payloadSizeByteLen..]) {
                             Ok(v) => v,
                             Err(_) => todo!("error while parsing varint from cell, probably treat this as corruption?"),
                         };
+
                         // TODO: add overflow page calculation
-                        payload_size + nr_payload as u64 + nr_key as u64
+                        payloadSizeByteLen as u64 + rowIdByteLen as u64 + payloadSize
                     }
-                    PageType::IndexInterior => todo!(),
-                    PageType::IndexLeaf => todo!(),
+                    _ => todo!(),
                 };
-                cbrk -= size;
-                if cbrk < first_cell as u64 || pc + size > usable_space {
+
+                // 它是不断的减少的,读应了data cell是从page的末尾倒序排步的
+                dataCellsStartPosNew -= size;
+                if dataCellsStartPosNew < gapStartPos as u64 || dataCellPos + size > pageUsableSpace {
                     todo!("corrupt");
                 }
-                assert!(cbrk + size <= usable_space && cbrk >= first_cell as u64);
+
+                assert!(dataCellsStartPosNew + size <= pageUsableSpace && dataCellsStartPosNew >= gapStartPos as u64);
+
                 // set new pointer
-                write_buf[cell_idx..cell_idx + 2].copy_from_slice(&(cbrk as u16).to_be_bytes());
+                bufNew[pointerCellPos..pointerCellPos + page::POINTER_CELL_BYTE_LEN].copy_from_slice(&(dataCellsStartPosNew as u16).to_be_bytes());
+
                 // copy payload
-                write_buf[cbrk as usize..cbrk as usize + size as usize].copy_from_slice(&read_buf[pc as usize..pc as usize + size as usize]);
+                bufNew[dataCellsStartPosNew as usize..dataCellsStartPosNew as usize + size as usize].copy_from_slice(&bufOld[dataCellPos as usize..dataCellPos as usize + size as usize]);
             }
         }
 
-        // assert!( nfree >= 0 );
-        // if( data[hdr+7]+cbrk-iCellFirst!=pPage->nFree ){
-        //   return SQLITE_CORRUPT_PAGE(pPage);
-        // }
-        assert!(cbrk >= first_cell as u64);
-        let write_buf = self.asMutSlice();
+        assert!(dataCellsStartPosNew >= gapStartPos as u64);
 
-        // set new first byte of cell content
-        self.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT, cbrk as u16);
+        // 变更 dataCellRegion(cellContentArea)的start pos
+        self.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT_START_POS, dataCellsStartPosNew as u16);
+
         // set free block to 0, unused spaced can be retrieved from gap between cell pointer end and content start
         self.write_u16(page::PAGE_HEADER_OFFSET_FREE_BLOCK, 0);
-        // set unused space to 0
-        let first_cell = cloned_page.cellContentAreaPos() as u64;
-        assert!(first_cell <= cbrk);
-        write_buf[first_cell as usize..cbrk as usize].fill(0);
+
+        let dataCellsStartPosOld = pageContentOld.cellContentAreaStartPos() as u64;
+        assert!(dataCellsStartPosOld <= dataCellsStartPosNew);
+
+        bufNew[dataCellsStartPosOld as usize..dataCellsStartPosNew as usize].fill(0);
     }
 }
 
@@ -1066,61 +1076,43 @@ pub fn read_value(buf: &[u8], serial_type: &SerialType) -> Result<(OwnedValue, u
             if buf.len() < 2 {
                 crate::bail_corrupt_error!("Invalid BEInt16 value");
             }
-            Ok((
-                OwnedValue::Integer(i16::from_be_bytes([buf[0], buf[1]]) as i64),
-                2,
-            ))
+
+            Ok((OwnedValue::Integer(i16::from_be_bytes([buf[0], buf[1]]) as i64), 2))
         }
         SerialType::BEInt24 => {
             if buf.len() < 3 {
                 crate::bail_corrupt_error!("Invalid BEInt24 value");
             }
-            Ok((
-                OwnedValue::Integer(i32::from_be_bytes([0, buf[0], buf[1], buf[2]]) as i64),
-                3,
-            ))
+
+            Ok((OwnedValue::Integer(i32::from_be_bytes([0, buf[0], buf[1], buf[2]]) as i64), 3))
         }
         SerialType::BEInt32 => {
             if buf.len() < 4 {
                 crate::bail_corrupt_error!("Invalid BEInt32 value");
             }
-            Ok((
-                OwnedValue::Integer(i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as i64),
-                4,
-            ))
+
+            Ok((OwnedValue::Integer(i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as i64), 4))
         }
         SerialType::BEInt48 => {
             if buf.len() < 6 {
                 crate::bail_corrupt_error!("Invalid BEInt48 value");
             }
-            Ok((
-                OwnedValue::Integer(i64::from_be_bytes([
-                    0, 0, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5],
-                ])),
-                6,
-            ))
+
+            Ok((OwnedValue::Integer(i64::from_be_bytes([0, 0, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], ])), 6))
         }
         SerialType::BEInt64 => {
             if buf.len() < 8 {
                 crate::bail_corrupt_error!("Invalid BEInt64 value");
             }
-            Ok((
-                OwnedValue::Integer(i64::from_be_bytes([
-                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-                ])),
-                8,
-            ))
+
+            Ok((OwnedValue::Integer(i64::from_be_bytes([buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], ])), 8))
         }
         SerialType::BEFloat64 => {
             if buf.len() < 8 {
                 crate::bail_corrupt_error!("Invalid BEFloat64 value");
             }
-            Ok((
-                OwnedValue::Float(f64::from_be_bytes([
-                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-                ])),
-                8,
-            ))
+
+            Ok((OwnedValue::Float(f64::from_be_bytes([buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], ])), 8))
         }
         SerialType::ConstInt0 => Ok((OwnedValue::Integer(0), 0)),
         SerialType::ConstInt1 => Ok((OwnedValue::Integer(1), 0)),
@@ -1128,16 +1120,14 @@ pub fn read_value(buf: &[u8], serial_type: &SerialType) -> Result<(OwnedValue, u
             if buf.len() < n {
                 crate::bail_corrupt_error!("Invalid Blob value");
             }
+
             Ok((OwnedValue::Blob(buf[0..n].to_vec().into()), n))
         }
         SerialType::String(n) => {
             if buf.len() < n {
-                crate::bail_corrupt_error!(
-                    "Invalid String value, length {} < expected length {}",
-                    buf.len(),
-                    n
-                );
+                crate::bail_corrupt_error!("Invalid String value, length {} < expected length {}",buf.len(),n);
             }
+
             let bytes = buf[0..n].to_vec();
             let value = unsafe { String::from_utf8_unchecked(bytes) };
             Ok((OwnedValue::Text(value.into()), n))
@@ -1237,12 +1227,10 @@ fn finish_read_wal_header(buf: Rc<RefCell<Buffer>>, header: Arc<RwLock<WalHeader
     Ok(())
 }
 
-pub fn begin_read_wal_frame(
-    io: &Rc<dyn File>,
-    offset: usize,
-    buffer_pool: Rc<BufferPool>,
-    page: PageArc,
-) -> Result<()> {
+pub fn begin_read_wal_frame(io: &Rc<dyn File>,
+                            offset: usize,
+                            buffer_pool: Rc<BufferPool>,
+                            page: PageArc) -> Result<()> {
     let buf = buffer_pool.get();
     let drop_fn = Rc::new(move |buf| {
         let buffer_pool = buffer_pool.clone();
@@ -1259,15 +1247,13 @@ pub fn begin_read_wal_frame(
     Ok(())
 }
 
-pub fn begin_write_wal_frame(
-    io: &Rc<dyn File>,
-    offset: usize,
-    page: &PageArc,
-    db_size: u32,
-    write_counter: Rc<RefCell<usize>>,
-    wal_header: &WalHeader,
-    checksums: (u32, u32),
-) -> Result<(u32, u32)> {
+pub fn begin_write_wal_frame(io: &Rc<dyn File>,
+                             offset: usize,
+                             page: &PageArc,
+                             db_size: u32,
+                             write_counter: Rc<RefCell<usize>>,
+                             wal_header: &WalHeader,
+                             checksums: (u32, u32)) -> Result<(u32, u32)> {
     let page_finish = page.clone();
     let page_id = page.getMutInner().pageId;
     trace!("begin_write_wal_frame(offset={}, page={})", offset, page_id);
