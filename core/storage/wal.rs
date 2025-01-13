@@ -5,9 +5,7 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 use log::{debug, trace};
 
 use crate::io::{File, SyncCompletion, IO};
-use crate::storage::sqlite3_ondisk::{
-    begin_read_wal_frame, begin_write_wal_frame,
-};
+use crate::storage::sqlite3_ondisk::{begin_read_wal_frame, begin_write_wal_frame};
 use crate::{Buffer, Result};
 use crate::{CompletionEnum, Page};
 
@@ -85,8 +83,7 @@ pub enum CheckpointStatus {
 // in flight information of the checkpoint in OngoingCheckpoint. page is just a helper Page to do
 // page operations like reading a frame to a page, and writing a page to disk. This page should not
 // be placed back in pager page cache or anything, it's just a helper.
-// min_frame and max_frame is the range of frames that can be safely transferred from WAL to db
-// file.
+// min_frame and max_frame is the range of frames that can be safely transferred from WAL to db file.
 // current_page is a helper to iterate through all the pages that might have a frame in the safe
 // range. This is inneficient for now.
 struct OngoingCheckpoint {
@@ -174,16 +171,13 @@ impl Wal for WalFile {
 
     /// Read a frame from the WAL.
     fn readFrame(&self, frame_id: u64, page: PageArc, buffer_pool: Rc<BufferPool>) -> Result<()> {
-        debug!("read_frame({})", frame_id);
         let offset = self.frame_offset(frame_id);
         let shared = self.walFileShared.read().unwrap();
         page.setLocked();
-        begin_read_wal_frame(
-            &shared.file,
-            offset + WAL_FRAME_HEADER_SIZE,
-            buffer_pool,
-            page,
-        )?;
+        begin_read_wal_frame(&shared.file,
+                             offset + WAL_FRAME_HEADER_SIZE,
+                             buffer_pool,
+                             page)?;
         Ok(())
     }
 
@@ -200,15 +194,13 @@ impl Wal for WalFile {
         let header = shared.walHeader.clone();
         let header = header.read().unwrap();
         let checksums = shared.lastChecksum;
-        let checksums = begin_write_wal_frame(
-            &shared.file,
-            offset,
-            &page,
-            db_size,
-            write_counter,
-            &header,
-            checksums,
-        )?;
+        let checksums = begin_write_wal_frame(&shared.file,
+                                              offset,
+                                              &page,
+                                              db_size,
+                                              write_counter,
+                                              &header,
+                                              checksums)?;
         shared.lastChecksum = checksums;
         shared.maxFrame = frame_id + 1;
         {
@@ -231,9 +223,9 @@ impl Wal for WalFile {
     }
 
     fn checkpoint(&mut self, pager: &Pager, write_counter: Rc<RefCell<usize>>) -> Result<CheckpointStatus> {
-        'checkpoint_loop: loop {
+        'checkpoint_loop:
+        loop {
             let state = self.ongoing_checkpoint.state;
-            log::debug!("checkpoint(state={:?})", state);
             match state {
                 CheckpointState::Start => {
                     // TODO(pere): check what frames are safe to checkpoint between many readers!
@@ -244,32 +236,24 @@ impl Wal for WalFile {
                 }
                 CheckpointState::ReadFrame => {
                     let shared = self.walFileShared.read().unwrap();
-                    assert!(
-                        self.ongoing_checkpoint.current_page as usize
-                            <= shared.pageIdsInFrame.len()
-                    );
-                    if self.ongoing_checkpoint.current_page as usize == shared.pageIdsInFrame.len()
-                    {
+                    assert!(self.ongoing_checkpoint.current_page as usize <= shared.pageIdsInFrame.len());
+                    if self.ongoing_checkpoint.current_page as usize == shared.pageIdsInFrame.len() {
                         self.ongoing_checkpoint.state = CheckpointState::Done;
                         continue 'checkpoint_loop;
                     }
-                    let page =
-                        shared.pageIdsInFrame[self.ongoing_checkpoint.current_page as usize];
-                    let frames = shared
-                        .frameCache
-                        .get(&page)
-                        .expect("page must be in frame cache if it's in list");
+
+                    let page = shared.pageIdsInFrame[self.ongoing_checkpoint.current_page as usize];
+
+                    let frames = shared.frameCache.get(&page).expect("page must be in frame cache if it's in list");
 
                     for frame in frames.iter().rev() {
                         // TODO: do proper selection of frames to checkpoint
                         if *frame >= self.ongoing_checkpoint.min_frame {
                             self.ongoing_checkpoint.page.getMutInner().pageId = page as usize;
 
-                            self.readFrame(
-                                *frame,
-                                self.ongoing_checkpoint.page.clone(),
-                                self.buffer_pool.clone(),
-                            )?;
+                            self.readFrame(*frame,
+                                           self.ongoing_checkpoint.page.clone(),
+                                           self.buffer_pool.clone())?;
                             self.ongoing_checkpoint.state = CheckpointState::WaitReadFrame;
                             self.ongoing_checkpoint.current_page += 1;
                             continue 'checkpoint_loop;
@@ -280,27 +264,24 @@ impl Wal for WalFile {
                 CheckpointState::WaitReadFrame => {
                     if self.ongoing_checkpoint.page.is_locked() {
                         return Ok(CheckpointStatus::IO);
-                    } else {
-                        self.ongoing_checkpoint.state = CheckpointState::WritePage;
                     }
+
+                    self.ongoing_checkpoint.state = CheckpointState::WritePage;
                 }
                 CheckpointState::WritePage => {
                     self.ongoing_checkpoint.page.setDirty();
-                    begin_write_btree_page(
-                        pager,
-                        &self.ongoing_checkpoint.page,
-                        write_counter.clone(),
-                    )?;
+                    begin_write_btree_page(pager,
+                                           &self.ongoing_checkpoint.page,
+                                           write_counter.clone())?;
                     self.ongoing_checkpoint.state = CheckpointState::WaitWritePage;
                 }
                 CheckpointState::WaitWritePage => {
                     if *write_counter.borrow() > 0 {
                         return Ok(CheckpointStatus::IO);
                     }
+
                     let shared = self.walFileShared.read().unwrap();
-                    if (self.ongoing_checkpoint.current_page as usize)
-                        < shared.pageIdsInFrame.len()
-                    {
+                    if (self.ongoing_checkpoint.current_page as usize) < shared.pageIdsInFrame.len() {
                         self.ongoing_checkpoint.state = CheckpointState::ReadFrame;
                     } else {
                         self.ongoing_checkpoint.state = CheckpointState::Done;
@@ -327,15 +308,11 @@ impl Wal for WalFile {
         match state {
             SyncState::NotSyncing => {
                 let shared = self.walFileShared.write().unwrap();
-                log::debug!("wal_sync");
                 {
                     let syncing = self.syncing.clone();
                     *syncing.borrow_mut() = true;
                     let completion = CompletionEnum::Sync(SyncCompletion {
-                        complete: Box::new(move |_| {
-                            log::debug!("wal_sync finish");
-                            *syncing.borrow_mut() = false;
-                        }),
+                        complete: Box::new(move |_| { *syncing.borrow_mut() = false; }),
                     });
                     shared.file.sync(Rc::new(completion))?;
                 }
@@ -409,9 +386,7 @@ impl WalFile {
 }
 
 impl WalFileShared {
-    pub fn open_shared(io: &Arc<dyn IO>,
-                       path: &str,
-                       page_size: u16) -> Result<Arc<RwLock<WalFileShared>>> {
+    pub fn open_shared(io: &Arc<dyn IO>, path: &str, page_size: u16) -> Result<Arc<RwLock<WalFileShared>>> {
         let file = io.openFile(path, crate::io::OpenFlags::Create, false)?;
 
         let header = if file.size()? > 0 {
@@ -441,11 +416,10 @@ impl WalFileShared {
             // encoded to big endian, therefore we wan't to swap bytes to compute this
             // checksum.
             let checksums = (0, 0);
-            let checksums = checksum_wal(
-                &wal_header.as_bytes()[..WAL_HEADER_SIZE - 2 * 4], // first 24 bytes
-                &wal_header,
-                checksums,
-                native, // this is false because we haven't encoded the wal header yet
+            let checksums = checksum_wal(&wal_header.as_bytes()[..WAL_HEADER_SIZE - 2 * 4], // first 24 bytes
+                                         &wal_header,
+                                         checksums,
+                                         native, // this is false because we haven't encoded the wal header yet
             );
             wal_header.checksum_1 = checksums.0;
             wal_header.checksum_2 = checksums.1;

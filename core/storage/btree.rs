@@ -872,20 +872,12 @@ impl BTreeCursor {
     fn balanceLeaf(&mut self) -> Result<CursorResult<()>> {
         match self.writeInfo.writeState {
             WriteState::BalanceStart => {
-                // drop divider cells and find right pointer
-                // NOTE: since we are doing a simple split we only finding the pointer we want to update (right pointer).
-                // Right pointer means cell that points to the last page, as we don't really want to drop this one. This one
-                // can be a "rightmost pointer" or a "cell".
-                // we always asumme there is a parent
                 let curPage = self.pageStack.top();
 
-                {
-                    // check if we don't need to balance ,don't continue if there are no overflow cells
-                    let curPageContent = curPage.getMutInner().pageContent.as_mut().unwrap();
-                    if curPageContent.overflowCells.is_empty() {
-                        self.writeInfo.writeState = WriteState::Finish;
-                        return Ok(CursorResult::Ok(()));
-                    }
+                // check if we don't need to balance ,don't continue if there are no overflow cells
+                if curPage.getMutInner().pageContent.as_mut().unwrap().overflowCells.is_empty() {
+                    self.writeInfo.writeState = WriteState::Finish;
+                    return Ok(CursorResult::Ok(()));
                 }
 
                 if !self.pageStack.hasParent() {
@@ -956,38 +948,40 @@ impl BTreeCursor {
                 };
 
                 parentPage.setDirty();
-
                 self.pager.addDirtyPageId(parentPage.getMutInner().pageId);
 
                 let parentPageContent = parentPage.getMutInner().pageContent.as_mut().unwrap();
                 assert_eq!(parentPageContent.overflowCells.len(), 0);
 
-                // Right page pointer is u32 in right most pointer, and in cell is u32 too, so we can use a *u32 to hold where we want to change this value
-                let mut right_pointer = page::PAGE_HEADER_OFFSET_RIGHTMOST;
+                let rightmostPos = {
+                    let mut rightmostPos = page::PAGE_HEADER_OFFSET_RIGHTMOST;
 
-                for cellIndex in 0..parentPageContent.cellCount() {
-                    let cell =
-                        parentPageContent.getCell(cellIndex,
-                                                  self.pager.clone(),
-                                                  self.maxLocal(curPageType.clone()),
-                                                  self.minLocal(),
-                                                  self.pageUsableSpace())?;
+                    for cellIndex in 0..parentPageContent.cellCount() {
+                        let cell =
+                            parentPageContent.getCell(cellIndex,
+                                                      self.pager.clone(),
+                                                      self.maxLocal(curPageType.clone()),
+                                                      self.minLocal(),
+                                                      self.pageUsableSpace())?;
 
-                    let found = match cell {
-                        BTreeCell::TableInteriorCell(interior) => interior.leftChildPageIndex as usize == curPageIndex,
-                        _ => unreachable!("Parent should always be a "),
-                    };
+                        let found = match cell {
+                            BTreeCell::TableInteriorCell(tableInteriorCell) => tableInteriorCell.leftChildPageIndex as usize == curPageIndex,
+                            _ => unreachable!("Parent should always be a "),
+                        };
 
-                    if found {
-                        let (start, _) =
-                            parentPageContent.getCellPayloadStartPos(cellIndex,
-                                                                     self.maxLocal(curPageType.clone()),
-                                                                     self.minLocal(),
-                                                                     self.pageUsableSpace());
-                        right_pointer = start;
-                        break;
+                        if found {
+                            let (start, _) =
+                                parentPageContent.getCellPayloadStartPos(cellIndex,
+                                                                         self.maxLocal(curPageType.clone()),
+                                                                         self.minLocal(),
+                                                                         self.pageUsableSpace());
+                            rightmostPos = start;
+                            break;
+                        }
                     }
-                }
+
+                    rightmostPos
+                };
 
                 let mut newPages = self.writeInfo.newPages.borrow_mut();
                 let scratchCells = self.writeInfo.scratchCells.borrow();
@@ -1001,8 +995,8 @@ impl BTreeCursor {
                     newPageContent.write_u16(page::PAGE_HEADER_OFFSET_FREE_BLOCK, 0);
                     newPageContent.write_u16(page::PAGE_HEADER_OFFSET_CELL_COUNT, 0);
 
-                    let db_header = RefCell::borrow(&self.dbHeader);
-                    newPageContent.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT_START_POS, db_header.pageSize - db_header.pageReservedSpace as u16);
+                    let dbHeader = RefCell::borrow(&self.dbHeader);
+                    newPageContent.write_u16(page::PAGE_HEADER_OFFSET_CELL_CONTENT_START_POS, dbHeader.pageUsableSpace() as u16);
 
                     newPageContent.write_u8(page::PAGE_HEADER_OFFSET_FRAGMENTED, 0);
 
@@ -1015,7 +1009,7 @@ impl BTreeCursor {
                 let newPagesLen = newPages.len();
                 let cellsPerPage = scratchCells.len() / newPagesLen;
                 let mut current_cell_index = 0_usize;
-                let mut dividerCellIndexVec = Vec::new(); /* index to scratch cells that will be used as dividers in order */
+                let mut dividerCellIndexVec = Vec::new();
 
                 for (i, newPage) in newPages.iter().enumerate() {
                     let newPageContent = newPage.getMutInner().pageContent.as_mut().unwrap();
@@ -1075,10 +1069,10 @@ impl BTreeCursor {
                 for (newPageIndex, newPage) in newPages.iter_mut().take(newPagesLen - 1).enumerate() {
                     let newPageContent = newPage.getMutInner().pageContent.as_mut().unwrap();
 
-                    let cellPayload = scratchCells[dividerCellIndexVec[newPageIndex]];
+                    let dividerCellPayload = scratchCells[dividerCellIndexVec[newPageIndex]];
 
                     let cell =
-                        readBtreeCell(cellPayload,
+                        readBtreeCell(dividerCellPayload,
                                       &newPageContent.getPageType(),
                                       0,
                                       self.pager.clone(),
@@ -1093,6 +1087,7 @@ impl BTreeCursor {
                             _ => unreachable!(),
                         };
 
+                        // 生成 table interior cell
                         let mut divider_cell = Vec::new();
                         divider_cell.extend_from_slice(&(newPage.getMutInner().pageId as u32).to_be_bytes());
                         divider_cell.extend(std::iter::repeat(0).take(9));
@@ -1109,13 +1104,13 @@ impl BTreeCursor {
                         };
 
                         let parent_cell_idx = self.findCell(newPageContent, rowId);
-                        self.insertIntoCell(parentPageContent, cellPayload, parent_cell_idx);
+                        self.insertIntoCell(parentPageContent, dividerCellPayload, parent_cell_idx);
                         // self.drop_cell(*page, 0);
                     }
                 }
 
                 // copy last page id to right pointer
-                parentPageContent.write_u32(right_pointer, newPages.last().unwrap().getMutInner().pageId as u32);
+                parentPageContent.write_u32(rightmostPos, newPages.last().unwrap().getMutInner().pageId as u32);
 
                 self.pageStack.pop();
                 self.writeInfo.writeState = WriteState::BalanceStart;
