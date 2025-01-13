@@ -454,12 +454,11 @@ impl PageContent {
         (self.offset + headerSize, self.cellCount() * page::POINTER_CELL_BYTE_LEN)
     }
 
-    /* Get region of a cell's payload */
-    pub fn cell_get_raw_region(&self,
-                               idx: usize,
-                               max_local: usize,
-                               min_local: usize,
-                               usable_size: usize) -> (usize, usize) {
+    pub fn getCellPayloadStartPos(&self,
+                                  cellIndex: usize,
+                                  max_local: usize,
+                                  min_local: usize,
+                                  usable_size: usize) -> (usize, usize) {
         let buf = self.asMutSlice();
         let ncells = self.cellCount();
         let cell_start = match self.getPageType() {
@@ -468,8 +467,8 @@ impl PageContent {
             PageType::IndexLeaf => 8,
             PageType::TableLeaf => 8,
         };
-        assert!(idx < ncells, "cell_get: idx out of bounds");
-        let cell_pointer = cell_start + (idx * 2);
+        assert!(cellIndex < ncells, "cell_get: idx out of bounds");
+        let cell_pointer = cell_start + (cellIndex * page::POINTER_CELL_BYTE_LEN);
         let cell_pointer = self.read_u16(cell_pointer) as usize;
         let start = cell_pointer;
         let len = match self.getPageType() {
@@ -848,8 +847,8 @@ pub struct TableInteriorCell {
 #[derive(Debug, Clone)]
 pub struct TableLeafCell {
     pub rowId: u64,
-    pub _payload: Vec<u8>,
-    pub first_overflow_page: Option<u32>,
+    pub payload: Vec<u8>,
+    pub firstOverflowPageIndex: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -903,8 +902,8 @@ pub fn readBtreeCell(pageData: &[u8],
 
             Ok(BTreeCell::TableLeafCell(TableLeafCell {
                 rowId: rowid,
-                _payload: payload,
-                first_overflow_page,
+                payload: payload,
+                firstOverflowPageIndex: first_overflow_page,
             }))
         }
         PageType::IndexInterior => {

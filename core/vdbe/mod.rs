@@ -2020,29 +2020,18 @@ impl Program {
                             };
 
                             match (acc.as_mut(), col) {
-                                (None, value) => {
-                                    *acc.borrow_mut() = Some(value);
-                                }
-                                (
-                                    Some(OwnedValue::Integer(ref mut current_min)),
-                                    OwnedValue::Integer(value),
-                                ) => {
+                                (None, value) => *acc.borrow_mut() = Some(value),
+                                (Some(OwnedValue::Integer(ref mut current_min)), OwnedValue::Integer(value)) => {
                                     if value < *current_min {
                                         *current_min = value;
                                     }
                                 }
-                                (
-                                    Some(OwnedValue::Float(ref mut current_min)),
-                                    OwnedValue::Float(value),
-                                ) => {
+                                (Some(OwnedValue::Float(ref mut current_min)), OwnedValue::Float(value)) => {
                                     if value < *current_min {
                                         *current_min = value;
                                     }
                                 }
-                                (
-                                    Some(OwnedValue::Text(ref mut current_min)),
-                                    OwnedValue::Text(value),
-                                ) => {
+                                (Some(OwnedValue::Text(ref mut current_min)), OwnedValue::Text(value)) => {
                                     if value < *current_min {
                                         *current_min = value;
                                     }
@@ -2092,34 +2081,20 @@ impl Program {
                         OwnedValue::Null => {
                             // when the set is empty
                             match func {
-                                AggFunc::Total => {
-                                    programState.registers[*register] = OwnedValue::Float(0.0);
-                                }
-                                AggFunc::Count => {
-                                    programState.registers[*register] = OwnedValue::Integer(0);
-                                }
+                                AggFunc::Total => programState.registers[*register] = OwnedValue::Float(0.0),
+                                AggFunc::Count => programState.registers[*register] = OwnedValue::Integer(0),
                                 _ => {}
                             }
                         }
-                        _ => {
-                            unreachable!();
-                        }
+                        _ => unreachable!(),
                     };
                     programState.pc += 1;
                 }
-                Insn::SorterOpen {
-                    cursor_id,
-                    columns: _,
-                    order,
-                } => {
-                    let order = order
-                        .values
-                        .iter()
-                        .map(|v| match v {
-                            OwnedValue::Integer(i) => *i == 0,
-                            _ => unreachable!(),
-                        })
-                        .collect();
+                Insn::SorterOpen { cursor_id, columns: _, order } => {
+                    let order = order.values.iter().map(|v| match v {
+                        OwnedValue::Integer(i) => *i == 0,
+                        _ => unreachable!(),
+                    }).collect();
                     let cursor = Box::new(sorter::Sorter::new(order));
                     cursorId2Cursor.insert(*cursor_id, cursor);
                     programState.pc += 1;
@@ -2541,11 +2516,7 @@ impl Program {
                 Insn::MustBeInt { reg } => {
                     match programState.registers[*reg] {
                         OwnedValue::Integer(_) => {}
-                        _ => {
-                            crate::bail_parse_error!(
-                                "MustBeInt: the value in the register is not an integer"
-                            );
-                        }
+                        _ => crate::bail_parse_error!("MustBeInt: the value in the register is not an integer"),
                     };
                     programState.pc += 1;
                 }
@@ -2553,11 +2524,7 @@ impl Program {
                     programState.registers[*reg] = OwnedValue::Null;
                     programState.pc += 1;
                 }
-                Insn::NotExists {
-                    cursor,
-                    rowid_reg,
-                    target_pc,
-                } => {
+                Insn::NotExists { cursor, rowid_reg, target_pc } => {
                     let cursor = cursorId2Cursor.get_mut(cursor).unwrap();
                     let exists = return_if_io!(cursor.exists(&programState.registers[*rowid_reg]));
                     if exists {
@@ -2569,10 +2536,7 @@ impl Program {
                 // this cursor may be reused for next insert
                 // Update: tablemoveto is used to travers on not exists, on insert depending on flags if nonseek it traverses again.
                 // If not there might be some optimizations obviously.
-                Insn::OpenWriteAsync {
-                    cursorId: cursor_id,
-                    rootPage: root_page,
-                } => {
+                Insn::OpenWriteAsync { cursorId: cursor_id, rootPage: root_page } => {
                     let cursor = Box::new(BTreeCursor::new(
                         pager.clone(),
                         *root_page,
@@ -2894,13 +2858,10 @@ pub fn exec_soundex(reg: &OwnedValue) -> OwnedValue {
         });
 
     // Replace consonants with digits based on Soundex mapping
-    let tmp: String = code
-        .chars()
-        .map(|ch| match soundex_code(ch) {
-            Some(code) => code.to_string(),
-            None => ch.to_string(),
-        })
-        .collect();
+    let tmp: String = code.chars().map(|ch| match soundex_code(ch) {
+        Some(code) => code.to_string(),
+        None => ch.to_string(),
+    }).collect();
 
     // Remove adjacent same digits
     let tmp = tmp.chars().fold(String::new(), |mut acc, ch| {
@@ -2911,12 +2872,8 @@ pub fn exec_soundex(reg: &OwnedValue) -> OwnedValue {
     });
 
     // Remove all occurrences of a, e, i, o, u, y except the first letter
-    let mut result = tmp
-        .chars()
-        .enumerate()
-        .filter(|(i, ch)| *i == 0 || !matches!(ch, 'a' | 'e' | 'i' | 'o' | 'u' | 'y'))
-        .map(|(_, ch)| ch)
-        .collect::<String>();
+    let mut result = tmp.chars().enumerate()
+        .filter(|(i, ch)| *i == 0 || !matches!(ch, 'a' | 'e' | 'i' | 'o' | 'u' | 'y')).map(|(_, ch)| ch).collect::<String>();
 
     // If the first symbol is a digit, replace it with the saved first letter
     if let Some(first_digit) = result.chars().next() {
@@ -3000,16 +2957,13 @@ fn exec_quote(value: &OwnedValue) -> OwnedValue {
 }
 
 fn exec_char(values: Vec<OwnedValue>) -> OwnedValue {
-    let result: String = values
-        .iter()
-        .filter_map(|x| {
-            if let OwnedValue::Integer(i) = x {
-                Some(*i as u8 as char)
-            } else {
-                None
-            }
-        })
-        .collect();
+    let result: String = values.iter().filter_map(|x| {
+        if let OwnedValue::Integer(i) = x {
+            Some(*i as u8 as char)
+        } else {
+            None
+        }
+    }).collect();
     OwnedValue::Text(Rc::new(result))
 }
 
@@ -3064,17 +3018,11 @@ fn exec_glob(regex_cache: Option<&mut HashMap<String, Regex>>, pattern: &str, te
 }
 
 fn exec_min(regs: Vec<&OwnedValue>) -> OwnedValue {
-    regs.iter()
-        .min()
-        .map(|&v| v.to_owned())
-        .unwrap_or(OwnedValue::Null)
+    regs.iter().min().map(|&v| v.to_owned()).unwrap_or(OwnedValue::Null)
 }
 
 fn exec_max(regs: Vec<&OwnedValue>) -> OwnedValue {
-    regs.iter()
-        .max()
-        .map(|&v| v.to_owned())
-        .unwrap_or(OwnedValue::Null)
+    regs.iter().max().map(|&v| v.to_owned()).unwrap_or(OwnedValue::Null)
 }
 
 fn exec_nullif(first_value: &OwnedValue, second_value: &OwnedValue) -> OwnedValue {
@@ -3085,14 +3033,10 @@ fn exec_nullif(first_value: &OwnedValue, second_value: &OwnedValue) -> OwnedValu
     }
 }
 
-fn exec_substring(
-    str_value: &OwnedValue,
-    start_value: &OwnedValue,
-    length_value: &OwnedValue,
-) -> OwnedValue {
-    if let (OwnedValue::Text(str), OwnedValue::Integer(start), OwnedValue::Integer(length)) =
-        (str_value, start_value, length_value)
-    {
+fn exec_substring(str_value: &OwnedValue,
+                  start_value: &OwnedValue,
+                  length_value: &OwnedValue) -> OwnedValue {
+    if let (OwnedValue::Text(str), OwnedValue::Integer(start), OwnedValue::Integer(length)) = (str_value, start_value, length_value) {
         let start = *start as usize;
         if start > str.len() {
             return OwnedValue::Text(Rc::new("".to_string()));
@@ -3130,10 +3074,7 @@ fn exec_instr(reg: &OwnedValue, pattern: &OwnedValue) -> OwnedValue {
     }
 
     if let (OwnedValue::Blob(reg), OwnedValue::Blob(pattern)) = (reg, pattern) {
-        let result = reg
-            .windows(pattern.len())
-            .position(|window| window == **pattern)
-            .map_or(0, |i| i + 1);
+        let result = reg.windows(pattern.len()).position(|window| window == **pattern).map_or(0, |i| i + 1);
         return OwnedValue::Integer(result as i64);
     }
 
@@ -3197,11 +3138,7 @@ fn exec_unhex(reg: &OwnedValue, ignored_chars: Option<&OwnedValue>) -> OwnedValu
             Some(ignore) => match ignore {
                 OwnedValue::Text(_) => {
                     let pat = ignore.to_string();
-                    let trimmed = reg
-                        .to_string()
-                        .trim_start_matches(|x| pat.contains(x))
-                        .trim_end_matches(|x| pat.contains(x))
-                        .to_string();
+                    let trimmed = reg.to_string().trim_start_matches(|x| pat.contains(x)).trim_end_matches(|x| pat.contains(x)).to_string();
                     match hex::decode(trimmed) {
                         Ok(bytes) => OwnedValue::Blob(Rc::new(bytes)),
                         Err(_) => OwnedValue::Null,
@@ -3281,11 +3218,7 @@ fn exec_ltrim(reg: &OwnedValue, pattern: Option<OwnedValue>) -> OwnedValue {
         (reg, Some(pattern)) => match reg {
             OwnedValue::Text(_) | OwnedValue::Integer(_) | OwnedValue::Float(_) => {
                 let pattern_chars: Vec<char> = pattern.to_string().chars().collect();
-                OwnedValue::Text(Rc::new(
-                    reg.to_string()
-                        .trim_start_matches(&pattern_chars[..])
-                        .to_string(),
-                ))
+                OwnedValue::Text(Rc::new(reg.to_string().trim_start_matches(&pattern_chars[..]).to_string()))
             }
             _ => reg.to_owned(),
         },
@@ -3300,11 +3233,7 @@ fn exec_rtrim(reg: &OwnedValue, pattern: Option<OwnedValue>) -> OwnedValue {
         (reg, Some(pattern)) => match reg {
             OwnedValue::Text(_) | OwnedValue::Integer(_) | OwnedValue::Float(_) => {
                 let pattern_chars: Vec<char> = pattern.to_string().chars().collect();
-                OwnedValue::Text(Rc::new(
-                    reg.to_string()
-                        .trim_end_matches(&pattern_chars[..])
-                        .to_string(),
-                ))
+                OwnedValue::Text(Rc::new(reg.to_string().trim_end_matches(&pattern_chars[..]).to_string()))
             }
             _ => reg.to_owned(),
         },
@@ -3570,8 +3499,7 @@ fn to_f64(reg: &OwnedValue) -> Option<f64> {
 fn exec_math_unary(reg: &OwnedValue, function: &MathFunc) -> OwnedValue {
     // In case of some functions and integer input, return the input as is
     if let OwnedValue::Integer(_) = reg {
-        if matches! { function, MathFunc::Ceil | MathFunc::Ceiling | MathFunc::Floor | MathFunc::Trunc }
-        {
+        if matches! { function, MathFunc::Ceil | MathFunc::Ceiling | MathFunc::Floor | MathFunc::Trunc } {
             return reg.clone();
         }
     }

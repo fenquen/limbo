@@ -62,10 +62,10 @@ impl Page {
         }
     }
 
-    pub fn init(self: &PageArc,
-                pageType: PageType,
-                dbHeader: &DbHeader,
-                offset: usize) {
+    pub fn initPageHeader(self: &PageArc,
+                          pageType: PageType,
+                          dbHeader: &DbHeader,
+                          offset: usize) {
         let pageInner = self.getMutInner();
         let pageContent = pageInner.pageContent.as_mut().unwrap();
 
@@ -134,7 +134,7 @@ impl Page {
         self.getMutInner().flags.fetch_and(!PAGE_DIRTY, Ordering::SeqCst);
     }
 
-    pub fn is_loaded(&self) -> bool {
+    pub fn loaded(&self) -> bool {
         self.getMutInner().flags.load(Ordering::SeqCst) & PAGE_LOADED != 0
     }
 
@@ -260,7 +260,7 @@ impl Pager {
     }
 
     /// Loads pages if not loaded
-    pub fn load_page(&self, page: PageArc) -> Result<()> {
+    pub fn loadPage(&self, page: PageArc) -> Result<()> {
         let id = page.getMutInner().pageId;
 
         let mut page_cache = self.pageCache.write().unwrap();
