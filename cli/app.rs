@@ -394,10 +394,7 @@ impl LimboCliApp {
         }
         if let Ok(ref cmd) = Command::from_str(args[0]) {
             if args.len() < cmd.min_args() {
-                let _ = self.write_fmt(format_args!(
-                    "Insufficient arguments: USAGE: {}",
-                    cmd.usage()
-                ));
+                let _ = self.write_fmt(format_args!("Insufficient arguments: USAGE: {}", cmd.usage()));
                 return;
             }
             match cmd {

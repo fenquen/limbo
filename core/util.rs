@@ -46,8 +46,7 @@ pub fn parse_schema_rows(rows: Option<Rows>, schema: &mut Schema, io: Arc<dyn IO
                     }
                 }
                 RowResult::IO => {
-                    // TODO: How do we ensure that the I/O we submitted to
-                    // read the schema is actually complete?
+                    // TODO: How do we ensure that the I/O we submitted to read the schema is actually complete
                     io.runOnce()?;
                 }
                 RowResult::Done => break,

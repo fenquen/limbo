@@ -1087,7 +1087,7 @@ impl BTreeCursor {
                             _ => unreachable!(),
                         };
 
-                        // 生成 table interior cell
+                        // 生成 tableInteriorCell的
                         let mut divider_cell = Vec::new();
                         divider_cell.extend_from_slice(&(newPage.getMutInner().pageId as u32).to_be_bytes());
                         divider_cell.extend(std::iter::repeat(0).take(9));
