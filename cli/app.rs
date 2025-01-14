@@ -465,93 +465,82 @@ impl LimboCliApp {
                 }
             }
         } else {
-            let _ = self.write_fmt(format_args!(
-                "Unknown command: {}\nenter: .help for all available commands",
-                args[0]
-            ));
+            let _ = self.write_fmt(format_args!("Unknown command: {}\n enter: .help for all available commands", args[0]));
         }
     }
 
     pub fn query(&mut self, sql: &str) -> anyhow::Result<()> {
         match self.conn.query(sql) {
-            Ok(Some(ref mut rows)) => match self.opts.output_mode {
-                OutputMode::Raw => loop {
-                    if self.interrupt_count.load(Ordering::SeqCst) > 0 {
-                        println!("Query interrupted.");
-                        return Ok(());
-                    }
-
-                    match rows.next_row() {
-                        Ok(RowResult::Row(row)) => {
-                            for (i, value) in row.values.iter().enumerate() {
-                                if i > 0 {
-                                    let _ = self.writer.write(b"|");
-                                }
-                                let _ = self.writer.write(
-                                    match value {
-                                        Value::Null => self.opts.null_value.clone(),
-                                        Value::Integer(i) => format!("{}", i),
-                                        Value::Float(f) => format!("{:?}", f),
-                                        Value::Text(s) => s.to_string(),
-                                        Value::Blob(b) => {
-                                            format!("{}", String::from_utf8_lossy(b))
-                                        }
-                                    }
-                                        .as_bytes(),
-                                )?;
+            Ok(Some(ref mut rows)) =>
+                match self.opts.output_mode {
+                    OutputMode::Raw =>
+                        loop {
+                            if self.interrupt_count.load(Ordering::SeqCst) > 0 {
+                                println!("Query interrupted.");
+                                return Ok(());
                             }
-                            let _ = self.writeln("");
+
+                            match rows.next_row() {
+                                Ok(RowResult::Row(row)) => {
+                                    for (i, value) in row.values.iter().enumerate() {
+                                        if i > 0 {
+                                            let _ = self.writer.write(b"|");
+                                        }
+
+                                        let _ = self.writer.write(
+                                            match value {
+                                                Value::Null => self.opts.null_value.clone(),
+                                                Value::Integer(i) => format!("{}", i),
+                                                Value::Float(f) => format!("{:?}", f),
+                                                Value::Text(s) => s.to_string(),
+                                                Value::Blob(b) => format!("{}", String::from_utf8_lossy(b)),
+                                            }.as_bytes(),
+                                        )?;
+                                    }
+                                    let _ = self.writeln("");
+                                }
+                                Ok(RowResult::IO) => self.io.runOnce()?,
+                                Ok(RowResult::Done) => break,
+                                Err(err) => {
+                                    let _ = self.writeln(err.to_string());
+                                    break;
+                                }
+                            }
+                        },
+                    OutputMode::Pretty => {
+                        if self.interrupt_count.load(Ordering::SeqCst) > 0 {
+                            println!("Query interrupted.");
+                            return Ok(());
                         }
-                        Ok(RowResult::IO) => {
-                            self.io.runOnce()?;
+                        let mut table_rows: Vec<Vec<_>> = vec![];
+                        loop {
+                            match rows.next_row() {
+                                Ok(RowResult::Row(row)) => {
+                                    table_rows.push(
+                                        row.values.iter().map(|value| match value {
+                                            Value::Null => self.opts.null_value.clone().cell(),
+                                            Value::Integer(i) => i.to_string().cell(),
+                                            Value::Float(f) => f.to_string().cell(),
+                                            Value::Text(s) => s.cell(),
+                                            Value::Blob(b) => format!("{}", String::from_utf8_lossy(b)).cell(),
+                                        }).collect(),
+                                    );
+                                }
+                                Ok(RowResult::IO) => self.io.runOnce()?,
+                                Ok(RowResult::Done) => break,
+                                Err(err) => {
+                                    let _ = self.write_fmt(format_args!("{}", err));
+                                    break;
+                                }
+                            }
                         }
-                        Ok(RowResult::Done) => {
-                            break;
-                        }
-                        Err(err) => {
-                            let _ = self.writeln(err.to_string());
-                            break;
+                        if let Ok(table) = table_rows.table().display() {
+                            let _ = self.write_fmt(format_args!("{}", table));
+                        } else {
+                            let _ = self.writeln("Error displaying table.");
                         }
                     }
                 },
-                OutputMode::Pretty => {
-                    if self.interrupt_count.load(Ordering::SeqCst) > 0 {
-                        println!("Query interrupted.");
-                        return Ok(());
-                    }
-                    let mut table_rows: Vec<Vec<_>> = vec![];
-                    loop {
-                        match rows.next_row() {
-                            Ok(RowResult::Row(row)) => {
-                                table_rows.push(
-                                    row.values.iter().map(|value| match value {
-                                        Value::Null => self.opts.null_value.clone().cell(),
-                                        Value::Integer(i) => i.to_string().cell(),
-                                        Value::Float(f) => f.to_string().cell(),
-                                        Value::Text(s) => s.cell(),
-                                        Value::Blob(b) => {
-                                            format!("{}", String::from_utf8_lossy(b)).cell()
-                                        }
-                                    }).collect(),
-                                );
-                            }
-                            Ok(RowResult::IO) => {
-                                self.io.runOnce()?;
-                            }
-                            Ok(RowResult::Done) => break,
-                            Err(err) => {
-                                let _ = self.write_fmt(format_args!("{}", err));
-                                break;
-                            }
-                        }
-                    }
-                    if let Ok(table) = table_rows.table().display() {
-                        let _ = self.write_fmt(format_args!("{}", table));
-                    } else {
-                        let _ = self.writeln("Error displaying table.");
-                    }
-                }
-            },
             Ok(None) => {}
             Err(err) => { let _ = self.write_fmt(format_args!("{}", err)); }
         }
@@ -564,10 +553,7 @@ impl LimboCliApp {
 
     fn display_schema(&mut self, table: Option<&str>) -> anyhow::Result<()> {
         let sql = match table {
-            Some(table_name) => format!(
-                "SELECT sql FROM sqlite_schema WHERE type IN ('table', 'index') AND tbl_name = '{}' AND name NOT LIKE 'sqlite_%'",
-                table_name
-            ),
+            Some(table_name) => format!("SELECT sql FROM sqlite_schema WHERE type IN ('table', 'index') AND tbl_name = '{}' AND name NOT LIKE 'sqlite_%'", table_name),
             None => String::from("SELECT sql FROM sqlite_schema WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%'"),
         };
 
@@ -588,15 +574,13 @@ impl LimboCliApp {
                 }
                 if !found {
                     if let Some(table_name) = table {
-                        let _ = self.write_fmt(format_args!("Error: Table '{}' not found.", table_name));
+                        _ = self.write_fmt(format_args!("Error: Table '{}' not found.", table_name));
                     } else {
-                        let _ = self.writeln("No tables or indexes found in the database.");
+                        _ = self.writeln("No tables or indexes found in the database.");
                     }
                 }
             }
-            Ok(None) => {
-                let _ = self.writeln("No results returned from the query.");
-            }
+            Ok(None) => _ = self.writeln("No results returned from the query."),
             Err(err) => {
                 if err.to_string().contains("no such table: sqlite_schema") {
                     return Err(anyhow::anyhow!("Unable to access database schema. The database may be using an older SQLite version or may not be properly initialized."));
@@ -611,13 +595,8 @@ impl LimboCliApp {
 
     fn display_tables(&mut self, pattern: Option<&str>) -> anyhow::Result<()> {
         let sql = match pattern {
-            Some(pattern) => format!(
-                "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name LIKE '{}' ORDER BY 1",
-                pattern
-            ),
-            None => String::from(
-                "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY 1"
-            ),
+            Some(pattern) => format!("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name LIKE '{}' ORDER BY 1", pattern),
+            None => String::from("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY 1"),
         };
 
         match self.conn.query(&sql) {
@@ -652,10 +631,10 @@ impl LimboCliApp {
                 let _ = self.writeln("No results returned from the query.");
             }
             Err(err) => {
-                if err.to_string().contains("no such table: sqlite_schema") {
-                    return Err(anyhow::anyhow!("Unable to access database schema. The database may be using an older SQLite version or may not be properly initialized."));
+                return if err.to_string().contains("no such table: sqlite_schema") {
+                    Err(anyhow::anyhow!("Unable to access database schema. The database may be using an older SQLite version or may not be properly initialized."))
                 } else {
-                    return Err(anyhow::anyhow!("Error querying schema: {}", err));
+                    Err(anyhow::anyhow!("Error querying schema: {}", err))
                 }
             }
         }

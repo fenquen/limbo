@@ -866,12 +866,12 @@ pub struct IndexLeafCell {
 
 pub fn readBtreeCell(pageData: &[u8],
                      pageType: &PageType,
-                     pageDataPos: usize,
+                     cellDataPos: usize,
                      pager: Rc<Pager>,
                      maxLocal: usize,
                      minLocal: usize,
                      pageUsableSpace: usize) -> Result<BTreeCell> {
-    let mut pos = pageDataPos;
+    let mut pos = cellDataPos;
 
     match pageType {
         PageType::TableInterior => {

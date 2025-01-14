@@ -454,7 +454,6 @@ checksum = "62f822373a4fe84d4bb149bf54e584a7f4abec90e072ed49cda0edea5b95471f"
 dependencies = [
  "equivalent",
  "hashbrown",
- "serde",
 ]
 
 [[package]]
@@ -553,13 +552,11 @@ dependencies = [
 name = "limbo_core"
 version = "0.0.10"
 dependencies = [
- "bumpalo",
  "cfg_block",
  "chrono",
  "fallible-iterator",
  "getrandom",
  "hex",
- "indexmap",
  "io-uring",
  "julian_day_converter",
  "libc",
@@ -568,7 +565,6 @@ dependencies = [
  "nix 0.29.0",
  "rand",
  "regex",
- "serde",
  "sqlite3-parser",
  "thiserror",
 ]

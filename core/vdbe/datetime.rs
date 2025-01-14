@@ -67,36 +67,13 @@ fn apply_modifier(dt: &mut NaiveDateTime, modifier: &str) -> Result<()> {
         Modifier::Hours(hours) => *dt += TimeDelta::hours(hours),
         Modifier::Minutes(minutes) => *dt += TimeDelta::minutes(minutes),
         Modifier::Seconds(seconds) => *dt += TimeDelta::seconds(seconds),
-        Modifier::Months(_months) => todo!(),
-        Modifier::Years(_years) => todo!(),
         Modifier::TimeOffset(offset) => *dt += offset,
-        Modifier::DateOffset {
-            years,
-            months,
-            days,
-        } => {
-            *dt = dt
-                .checked_add_months(chrono::Months::new((years * 12 + months) as u32))
-                .ok_or_else(|| InvalidModifier("Invalid date offset".to_string()))?;
+        Modifier::DateOffset { years, months, days } => {
+            *dt = dt.checked_add_months(chrono::Months::new((years * 12 + months) as u32)).ok_or_else(|| InvalidModifier("Invalid date offset".to_string()))?;
             *dt += TimeDelta::days(days as i64);
         }
-        Modifier::DateTimeOffset { date: _, time: _ } => todo!(),
-        Modifier::Ceiling => todo!(),
-        Modifier::Floor => todo!(),
-        Modifier::StartOfMonth => todo!(),
-        Modifier::StartOfYear => {
-            *dt = NaiveDate::from_ymd_opt(dt.year(), 1, 1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap();
-        }
-        Modifier::StartOfDay => {
-            *dt = dt.date().and_hms_opt(0, 0, 0).unwrap();
-        }
-        Modifier::Weekday(_day) => todo!(),
-        Modifier::UnixEpoch => todo!(),
-        Modifier::JulianDay => todo!(),
-        Modifier::Auto => todo!(),
+        Modifier::StartOfYear => *dt = NaiveDate::from_ymd_opt(dt.year(), 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap(),
+        Modifier::StartOfDay => *dt = dt.date().and_hms_opt(0, 0, 0).unwrap(),
         Modifier::Localtime => {
             let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(*dt, Utc);
             *dt = utc_dt.with_timezone(&chrono::Local).naive_local();
@@ -105,7 +82,7 @@ fn apply_modifier(dt: &mut NaiveDateTime, modifier: &str) -> Result<()> {
             let local_dt = chrono::Local.from_local_datetime(dt).unwrap();
             *dt = local_dt.with_timezone(&Utc).naive_utc();
         }
-        Modifier::Subsec => todo!(),
+        _ => todo!(),
     }
 
     Ok(())
@@ -174,10 +151,7 @@ fn get_date_time_from_time_value_string(value: &str) -> Option<NaiveDateTime> {
         if let Some(dt) = if format.starts_with("%H") {
             // For time-only formats, assume date 2000-01-01
             // Ref: https://sqlite.org/lang_datefunc.html#tmval
-            parse_datetime_with_optional_tz(
-                &format!("2000-01-01 {}", value),
-                &format!("%Y-%m-%d {}", format),
-            )
+            parse_datetime_with_optional_tz(&format!("2000-01-01 {}", value), &format!("%Y-%m-%d {}", format))
         } else {
             parse_datetime_with_optional_tz(value, format)
         } {
@@ -311,7 +285,7 @@ fn parse_modifier_time(s: &str) -> Result<NaiveTime> {
         12 => NaiveTime::parse_from_str(s, "%H:%M:%S.%3f"),
         _ => return Err(InvalidModifier(format!("Invalid time format: {}", s))),
     }
-    .map_err(|_| InvalidModifier(format!("Invalid time format: {}", s)))
+        .map_err(|_| InvalidModifier(format!("Invalid time format: {}", s)))
 }
 
 fn parse_modifier(modifier: &str) -> Result<Modifier> {
@@ -319,21 +293,11 @@ fn parse_modifier(modifier: &str) -> Result<Modifier> {
 
     match modifier.as_str() {
         s if s.ends_with(" days") => Ok(Modifier::Days(parse_modifier_number(&s[..s.len() - 5])?)),
-        s if s.ends_with(" hours") => {
-            Ok(Modifier::Hours(parse_modifier_number(&s[..s.len() - 6])?))
-        }
-        s if s.ends_with(" minutes") => {
-            Ok(Modifier::Minutes(parse_modifier_number(&s[..s.len() - 8])?))
-        }
-        s if s.ends_with(" seconds") => {
-            Ok(Modifier::Seconds(parse_modifier_number(&s[..s.len() - 8])?))
-        }
-        s if s.ends_with(" months") => Ok(Modifier::Months(
-            parse_modifier_number(&s[..s.len() - 7])? as i32,
-        )),
-        s if s.ends_with(" years") => Ok(Modifier::Years(
-            parse_modifier_number(&s[..s.len() - 6])? as i32,
-        )),
+        s if s.ends_with(" hours") => Ok(Modifier::Hours(parse_modifier_number(&s[..s.len() - 6])?)),
+        s if s.ends_with(" minutes") => Ok(Modifier::Minutes(parse_modifier_number(&s[..s.len() - 8])?)),
+        s if s.ends_with(" seconds") => Ok(Modifier::Seconds(parse_modifier_number(&s[..s.len() - 8])?)),
+        s if s.ends_with(" months") => Ok(Modifier::Months(parse_modifier_number(&s[..s.len() - 7])? as i32)),
+        s if s.ends_with(" years") => Ok(Modifier::Years(parse_modifier_number(&s[..s.len() - 6])? as i32)),
         s if s.starts_with('+') || s.starts_with('-') => {
             // Parse as DateOffset or DateTimeOffset
             let parts: Vec<&str> = s[1..].split(' ').collect();
@@ -363,9 +327,7 @@ fn parse_modifier(modifier: &str) -> Result<Modifier> {
                         time: Some(time),
                     })
                 }
-                _ => Err(InvalidModifier(
-                    "Invalid date/time offset format".to_string(),
-                )),
+                _ => Err(InvalidModifier("Invalid date/time offset format".to_string())),
             }
         }
         "ceiling" => Ok(Modifier::Ceiling),
