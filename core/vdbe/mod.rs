@@ -2617,9 +2617,9 @@ fn get_new_rowid<R: Rng>(cursor: &mut Box<dyn Cursor>, mut rng: R) -> Result<Cur
                 CursorResult::Ok(true) => {
                     if count == max_attempts - 1 {
                         return Err(LimboError::InternalError("Failed to generate a new rowid".to_string()));
-                    } else {
-                        continue; // Try next random rowid
                     }
+
+                    continue;
                 }
                 CursorResult::IO => return Ok(CursorResult::IO),
             }
