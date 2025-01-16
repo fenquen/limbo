@@ -581,6 +581,9 @@ impl BTreeCursor {
             let mem_page = self.pageStack.top();
             let page_idx = mem_page.getMutInner().pageId;
             let page = self.pager.readPage(page_idx)?;
+            if !page.loaded() {
+                return Ok(CursorResult::IO);
+            }
             return_if_locked!(page);
             let contents = page.getMutInner().pageContent.as_ref().unwrap();
             if contents.isLeaf() {
