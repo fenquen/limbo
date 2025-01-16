@@ -1,5 +1,4 @@
 use crate::Result;
-use cfg_block::cfg_block;
 use std::fmt;
 use std::{
     cell::{Ref, RefCell, RefMut},
@@ -159,6 +158,28 @@ impl Buffer {
 
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         self.bufferData.as_mut_ptr()
+    }
+}
+
+#[macro_export]
+macro_rules! cfg_block {
+    ($( if #[cfg($meta:meta)] {$($item:item)*} else {$($item_f:item)*} )*) => {
+        $(
+        $(
+            #[cfg($meta)]
+            $item
+        )*
+        $(
+            #[cfg(not($meta))]
+            $item_f
+        )*
+        )*
+    };
+    ($( #[$meta:meta] {$($item:item)*} )*) => {
+        $($(
+            #[$meta]
+            $item
+        )*)*
     }
 }
 

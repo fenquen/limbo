@@ -24,7 +24,6 @@ io-uring = "0.6.1"
 mimalloc = { version = "*", default-features = false }
 
 [dependencies]
-cfg_block = "0.1.1"
 fallible-iterator = "0.3.0"
 hex = "0.4.3"
 libc = "0.2.155"
