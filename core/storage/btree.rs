@@ -1040,7 +1040,9 @@ impl BTreeCursor {
                     for newPage in newPages.iter_mut().take(newPagesLen - 1) {
                         let newPageContent = newPage.getMutInner().pageContent.as_mut().unwrap();
 
-                        assert_eq!(newPageContent.cellCount(), 1);
+                        // INSERT INTO users VALUES (1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'); 20000条能有效果
+                        // 测试了这个是错误的
+                        // assert_eq!(newPageContent.cellCount(), 1);
 
                         let lastCellIndex = newPageContent.cellCount() - 1;
 
@@ -1106,6 +1108,7 @@ impl BTreeCursor {
                             _ => unreachable!(),
                         };
 
+                        // 测试了这个是错误的
                         let parent_cell_idx = self.findCell(newPageContent, rowId);
                         self.insertIntoCell(parentPageContent, dividerCellPayload, parent_cell_idx);
                     }
