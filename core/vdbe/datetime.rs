@@ -263,15 +263,12 @@ enum Modifier {
 }
 
 fn parse_modifier_number(s: &str) -> Result<i64> {
-    s.trim()
-        .parse::<i64>()
-        .map_err(|_| InvalidModifier(format!("Invalid number: {}", s)))
+    s.trim().parse::<i64>().map_err(|_| InvalidModifier(format!("Invalid number: {}", s)))
 }
 
 /// supports YYYY-MM-DD format for time shift modifiers
 fn parse_modifier_date(s: &str) -> Result<NaiveDate> {
-    NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        .map_err(|_| InvalidModifier("Invalid date format".to_string()))
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| InvalidModifier("Invalid date format".to_string()))
 }
 
 /// supports following formats for time shift modifiers
@@ -284,8 +281,7 @@ fn parse_modifier_time(s: &str) -> Result<NaiveTime> {
         8 => NaiveTime::parse_from_str(s, "%H:%M:%S"),
         12 => NaiveTime::parse_from_str(s, "%H:%M:%S.%3f"),
         _ => return Err(InvalidModifier(format!("Invalid time format: {}", s))),
-    }
-        .map_err(|_| InvalidModifier(format!("Invalid time format: {}", s)))
+    }.map_err(|_| InvalidModifier(format!("Invalid time format: {}", s)))
 }
 
 fn parse_modifier(modifier: &str) -> Result<Modifier> {

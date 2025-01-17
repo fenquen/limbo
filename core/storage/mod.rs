@@ -18,12 +18,10 @@ pub trait Storage {
     fn sync(&self, c: Rc<CompletionEnum>) -> crate::Result<()>;
 }
 
-#[cfg(feature = "fs")]
 pub struct FileStorage {
     file: Rc<dyn File>,
 }
 
-#[cfg(feature = "fs")]
 impl Storage for FileStorage {
     fn readPage(&self, pageIndex: usize, c: Rc<CompletionEnum>) -> crate::Result<()> {
         let readCompletion = match &(*c) {
@@ -64,7 +62,6 @@ impl Storage for FileStorage {
     }
 }
 
-#[cfg(feature = "fs")]
 impl FileStorage {
     pub fn new(file: Rc<dyn File>) -> Self {
         Self { file }

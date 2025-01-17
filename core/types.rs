@@ -145,9 +145,9 @@ impl std::cmp::PartialOrd<AggContext> for AggContext {
     }
 }
 
-impl std::cmp::Eq for OwnedValue {}
+impl Eq for OwnedValue {}
 
-impl std::cmp::Ord for OwnedValue {
+impl Ord for OwnedValue {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.partial_cmp(other).unwrap()
     }

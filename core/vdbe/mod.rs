@@ -592,12 +592,10 @@ impl Program {
         let mut prev_insn: Option<&Insn> = None;
         for (addr, insn) in self.insns.iter().enumerate() {
             indent_count = get_indent_count(indent_count, insn, prev_insn);
-            print_insn(
-                self,
-                addr as InsnReference,
-                insn,
-                indent.repeat(indent_count),
-            );
+            print_insn(self,
+                       addr as InsnReference,
+                       insn,
+                       indent.repeat(indent_count));
             prev_insn = Some(insn);
         }
     }
@@ -618,75 +616,38 @@ impl Program {
                     let rhs = *rhs;
                     let dest = *dest;
                     match (&programState.registers[lhs], &programState.registers[rhs]) {
-                        (OwnedValue::Integer(lhs), OwnedValue::Integer(rhs)) => {
-                            programState.registers[dest] = OwnedValue::Integer(lhs + rhs);
-                        }
-                        (OwnedValue::Float(lhs), OwnedValue::Float(rhs)) => {
-                            programState.registers[dest] = OwnedValue::Float(lhs + rhs);
-                        }
-                        (OwnedValue::Float(f), OwnedValue::Integer(i))
-                        | (OwnedValue::Integer(i), OwnedValue::Float(f)) => {
-                            programState.registers[dest] = OwnedValue::Float(*f + *i as f64);
-                        }
-                        (OwnedValue::Null, _) | (_, OwnedValue::Null) => {
-                            programState.registers[dest] = OwnedValue::Null;
-                        }
+                        (OwnedValue::Integer(lhs), OwnedValue::Integer(rhs)) => programState.registers[dest] = OwnedValue::Integer(lhs + rhs),
+                        (OwnedValue::Float(lhs), OwnedValue::Float(rhs)) => programState.registers[dest] = OwnedValue::Float(lhs + rhs),
+                        (OwnedValue::Float(f), OwnedValue::Integer(i)) | (OwnedValue::Integer(i), OwnedValue::Float(f)) => programState.registers[dest] = OwnedValue::Float(*f + *i as f64),
+                        (OwnedValue::Null, _) | (_, OwnedValue::Null) => programState.registers[dest] = OwnedValue::Null,
                         (OwnedValue::Agg(aggctx), other) | (other, OwnedValue::Agg(aggctx)) => {
                             match other {
-                                OwnedValue::Null => {
-                                    programState.registers[dest] = OwnedValue::Null;
-                                }
+                                OwnedValue::Null => programState.registers[dest] = OwnedValue::Null,
                                 OwnedValue::Integer(i) => match aggctx.final_value() {
-                                    OwnedValue::Float(acc) => {
-                                        programState.registers[dest] = OwnedValue::Float(acc + *i as f64);
-                                    }
-                                    OwnedValue::Integer(acc) => {
-                                        programState.registers[dest] = OwnedValue::Integer(acc + i);
-                                    }
-                                    _ => {
-                                        todo!("{:?}", aggctx);
-                                    }
+                                    OwnedValue::Float(acc) => programState.registers[dest] = OwnedValue::Float(acc + *i as f64),
+                                    OwnedValue::Integer(acc) => programState.registers[dest] = OwnedValue::Integer(acc + i),
+                                    _ => todo!("{:?}", aggctx),
                                 },
                                 OwnedValue::Float(f) => match aggctx.final_value() {
-                                    OwnedValue::Float(acc) => {
-                                        programState.registers[dest] = OwnedValue::Float(acc + f);
-                                    }
-                                    OwnedValue::Integer(acc) => {
-                                        programState.registers[dest] = OwnedValue::Float(*acc as f64 + f);
-                                    }
-                                    _ => {
-                                        todo!("{:?}", aggctx);
-                                    }
+                                    OwnedValue::Float(acc) => programState.registers[dest] = OwnedValue::Float(acc + f),
+                                    OwnedValue::Integer(acc) => programState.registers[dest] = OwnedValue::Float(*acc as f64 + f),
+                                    _ => todo!("{:?}", aggctx),
                                 },
                                 OwnedValue::Agg(aggctx2) => {
                                     let acc = aggctx.final_value();
                                     let acc2 = aggctx2.final_value();
                                     match (acc, acc2) {
-                                        (OwnedValue::Integer(acc), OwnedValue::Integer(acc2)) => {
-                                            programState.registers[dest] = OwnedValue::Integer(acc + acc2);
-                                        }
-                                        (OwnedValue::Float(acc), OwnedValue::Float(acc2)) => {
-                                            programState.registers[dest] = OwnedValue::Float(acc + acc2);
-                                        }
-                                        (OwnedValue::Integer(acc), OwnedValue::Float(acc2)) => {
-                                            programState.registers[dest] =
-                                                OwnedValue::Float(*acc as f64 + acc2);
-                                        }
-                                        (OwnedValue::Float(acc), OwnedValue::Integer(acc2)) => {
-                                            programState.registers[dest] =
-                                                OwnedValue::Float(acc + *acc2 as f64);
-                                        }
-                                        _ => {
-                                            todo!("{:?} {:?}", acc, acc2);
-                                        }
+                                        (OwnedValue::Integer(acc), OwnedValue::Integer(acc2)) => programState.registers[dest] = OwnedValue::Integer(acc + acc2),
+                                        (OwnedValue::Float(acc), OwnedValue::Float(acc2)) => programState.registers[dest] = OwnedValue::Float(acc + acc2),
+                                        (OwnedValue::Integer(acc), OwnedValue::Float(acc2)) => programState.registers[dest] = OwnedValue::Float(*acc as f64 + acc2),
+                                        (OwnedValue::Float(acc), OwnedValue::Integer(acc2)) => programState.registers[dest] = OwnedValue::Float(acc + *acc2 as f64),
+                                        _ => todo!("{:?} {:?}", acc, acc2),
                                     }
                                 }
                                 rest => unimplemented!("{:?}", rest),
                             }
                         }
-                        _ => {
-                            todo!();
-                        }
+                        _ => todo!(),
                     }
                     programState.pc += 1;
                 }
@@ -695,103 +656,51 @@ impl Program {
                     let rhs = *rhs;
                     let dest = *dest;
                     match (&programState.registers[lhs], &programState.registers[rhs]) {
-                        (OwnedValue::Integer(lhs), OwnedValue::Integer(rhs)) => {
-                            programState.registers[dest] = OwnedValue::Integer(lhs - rhs);
-                        }
-                        (OwnedValue::Float(lhs), OwnedValue::Float(rhs)) => {
-                            programState.registers[dest] = OwnedValue::Float(lhs - rhs);
-                        }
-                        (OwnedValue::Float(lhs), OwnedValue::Integer(rhs)) => {
-                            programState.registers[dest] = OwnedValue::Float(lhs - *rhs as f64);
-                        }
-                        (OwnedValue::Integer(lhs), OwnedValue::Float(rhs)) => {
-                            programState.registers[dest] = OwnedValue::Float(*lhs as f64 - rhs);
-                        }
-                        (OwnedValue::Null, _) | (_, OwnedValue::Null) => {
-                            programState.registers[dest] = OwnedValue::Null;
-                        }
+                        (OwnedValue::Integer(lhs), OwnedValue::Integer(rhs)) => programState.registers[dest] = OwnedValue::Integer(lhs - rhs),
+                        (OwnedValue::Float(lhs), OwnedValue::Float(rhs)) => programState.registers[dest] = OwnedValue::Float(lhs - rhs),
+                        (OwnedValue::Float(lhs), OwnedValue::Integer(rhs)) => programState.registers[dest] = OwnedValue::Float(lhs - *rhs as f64),
+                        (OwnedValue::Integer(lhs), OwnedValue::Float(rhs)) => programState.registers[dest] = OwnedValue::Float(*lhs as f64 - rhs),
+                        (OwnedValue::Null, _) | (_, OwnedValue::Null) => programState.registers[dest] = OwnedValue::Null,
                         (OwnedValue::Agg(aggctx), rhs) => match rhs {
-                            OwnedValue::Null => {
-                                programState.registers[dest] = OwnedValue::Null;
-                            }
+                            OwnedValue::Null => programState.registers[dest] = OwnedValue::Null,
                             OwnedValue::Integer(i) => match aggctx.final_value() {
-                                OwnedValue::Float(acc) => {
-                                    programState.registers[dest] = OwnedValue::Float(acc - *i as f64);
-                                }
-                                OwnedValue::Integer(acc) => {
-                                    programState.registers[dest] = OwnedValue::Integer(acc - i);
-                                }
-                                _ => {
-                                    todo!("{:?}", aggctx);
-                                }
+                                OwnedValue::Float(acc) => programState.registers[dest] = OwnedValue::Float(acc - *i as f64),
+                                OwnedValue::Integer(acc) => programState.registers[dest] = OwnedValue::Integer(acc - i),
+                                _ => todo!("{:?}", aggctx),
                             },
                             OwnedValue::Float(f) => match aggctx.final_value() {
-                                OwnedValue::Float(acc) => {
-                                    programState.registers[dest] = OwnedValue::Float(acc - f);
-                                }
-                                OwnedValue::Integer(acc) => {
-                                    programState.registers[dest] = OwnedValue::Float(*acc as f64 - f);
-                                }
-                                _ => {
-                                    todo!("{:?}", aggctx);
-                                }
+                                OwnedValue::Float(acc) => programState.registers[dest] = OwnedValue::Float(acc - f),
+                                OwnedValue::Integer(acc) => programState.registers[dest] = OwnedValue::Float(*acc as f64 - f),
+                                _ => todo!("{:?}", aggctx),
                             },
                             OwnedValue::Agg(aggctx2) => {
                                 let acc = aggctx.final_value();
                                 let acc2 = aggctx2.final_value();
                                 match (acc, acc2) {
-                                    (OwnedValue::Integer(acc), OwnedValue::Integer(acc2)) => {
-                                        programState.registers[dest] = OwnedValue::Integer(acc - acc2);
-                                    }
-                                    (OwnedValue::Float(acc), OwnedValue::Float(acc2)) => {
-                                        programState.registers[dest] = OwnedValue::Float(acc - acc2);
-                                    }
-                                    (OwnedValue::Integer(acc), OwnedValue::Float(acc2)) => {
-                                        programState.registers[dest] =
-                                            OwnedValue::Float(*acc as f64 - acc2);
-                                    }
-                                    (OwnedValue::Float(acc), OwnedValue::Integer(acc2)) => {
-                                        programState.registers[dest] =
-                                            OwnedValue::Float(acc - *acc2 as f64);
-                                    }
-                                    _ => {
-                                        todo!("{:?} {:?}", acc, acc2);
-                                    }
+                                    (OwnedValue::Integer(acc), OwnedValue::Integer(acc2)) => programState.registers[dest] = OwnedValue::Integer(acc - acc2),
+                                    (OwnedValue::Float(acc), OwnedValue::Float(acc2)) => programState.registers[dest] = OwnedValue::Float(acc - acc2),
+                                    (OwnedValue::Integer(acc), OwnedValue::Float(acc2)) => programState.registers[dest] = OwnedValue::Float(*acc as f64 - acc2),
+                                    (OwnedValue::Float(acc), OwnedValue::Integer(acc2)) => programState.registers[dest] = OwnedValue::Float(acc - *acc2 as f64),
+                                    _ => todo!("{:?} {:?}", acc, acc2),
                                 }
                             }
                             rest => unimplemented!("{:?}", rest),
                         },
                         (lhs, OwnedValue::Agg(aggctx)) => match lhs {
-                            OwnedValue::Null => {
-                                programState.registers[dest] = OwnedValue::Null;
-                            }
+                            OwnedValue::Null => programState.registers[dest] = OwnedValue::Null,
                             OwnedValue::Integer(i) => match aggctx.final_value() {
-                                OwnedValue::Float(acc) => {
-                                    programState.registers[dest] = OwnedValue::Float(*i as f64 - acc);
-                                }
-                                OwnedValue::Integer(acc) => {
-                                    programState.registers[dest] = OwnedValue::Integer(i - acc);
-                                }
-                                _ => {
-                                    todo!("{:?}", aggctx);
-                                }
+                                OwnedValue::Float(acc) => programState.registers[dest] = OwnedValue::Float(*i as f64 - acc),
+                                OwnedValue::Integer(acc) => programState.registers[dest] = OwnedValue::Integer(i - acc),
+                                _ => todo!("{:?}", aggctx),
                             },
                             OwnedValue::Float(f) => match aggctx.final_value() {
-                                OwnedValue::Float(acc) => {
-                                    programState.registers[dest] = OwnedValue::Float(f - acc);
-                                }
-                                OwnedValue::Integer(acc) => {
-                                    programState.registers[dest] = OwnedValue::Float(f - *acc as f64);
-                                }
-                                _ => {
-                                    todo!("{:?}", aggctx);
-                                }
+                                OwnedValue::Float(acc) => programState.registers[dest] = OwnedValue::Float(f - acc),
+                                OwnedValue::Integer(acc) => programState.registers[dest] = OwnedValue::Float(f - *acc as f64),
+                                _ => todo!("{:?}", aggctx),
                             },
                             rest => unimplemented!("{:?}", rest),
                         },
-                        others => {
-                            todo!("{:?}", others);
-                        }
+                        others => todo!("{:?}", others),
                     }
                     programState.pc += 1;
                 }
@@ -800,75 +709,38 @@ impl Program {
                     let rhs = *rhs;
                     let dest = *dest;
                     match (&programState.registers[lhs], &programState.registers[rhs]) {
-                        (OwnedValue::Integer(lhs), OwnedValue::Integer(rhs)) => {
-                            programState.registers[dest] = OwnedValue::Integer(lhs * rhs);
-                        }
-                        (OwnedValue::Float(lhs), OwnedValue::Float(rhs)) => {
-                            programState.registers[dest] = OwnedValue::Float(lhs * rhs);
-                        }
-                        (OwnedValue::Integer(i), OwnedValue::Float(f))
-                        | (OwnedValue::Float(f), OwnedValue::Integer(i)) => {
-                            programState.registers[dest] = OwnedValue::Float(*i as f64 * { *f });
-                        }
-                        (OwnedValue::Null, _) | (_, OwnedValue::Null) => {
-                            programState.registers[dest] = OwnedValue::Null;
-                        }
+                        (OwnedValue::Integer(lhs), OwnedValue::Integer(rhs)) => programState.registers[dest] = OwnedValue::Integer(lhs * rhs),
+                        (OwnedValue::Float(lhs), OwnedValue::Float(rhs)) => programState.registers[dest] = OwnedValue::Float(lhs * rhs),
+                        (OwnedValue::Integer(i), OwnedValue::Float(f)) | (OwnedValue::Float(f), OwnedValue::Integer(i)) => programState.registers[dest] = OwnedValue::Float(*i as f64 * { *f }),
+                        (OwnedValue::Null, _) | (_, OwnedValue::Null) => programState.registers[dest] = OwnedValue::Null,
                         (OwnedValue::Agg(aggctx), other) | (other, OwnedValue::Agg(aggctx)) => {
                             match other {
-                                OwnedValue::Null => {
-                                    programState.registers[dest] = OwnedValue::Null;
-                                }
+                                OwnedValue::Null => programState.registers[dest] = OwnedValue::Null,
                                 OwnedValue::Integer(i) => match aggctx.final_value() {
-                                    OwnedValue::Float(acc) => {
-                                        programState.registers[dest] = OwnedValue::Float(acc * *i as f64);
-                                    }
-                                    OwnedValue::Integer(acc) => {
-                                        programState.registers[dest] = OwnedValue::Integer(acc * i);
-                                    }
-                                    _ => {
-                                        todo!("{:?}", aggctx);
-                                    }
+                                    OwnedValue::Float(acc) => programState.registers[dest] = OwnedValue::Float(acc * *i as f64),
+                                    OwnedValue::Integer(acc) => programState.registers[dest] = OwnedValue::Integer(acc * i),
+                                    _ => todo!("{:?}", aggctx),
                                 },
                                 OwnedValue::Float(f) => match aggctx.final_value() {
-                                    OwnedValue::Float(acc) => {
-                                        programState.registers[dest] = OwnedValue::Float(acc * f);
-                                    }
-                                    OwnedValue::Integer(acc) => {
-                                        programState.registers[dest] = OwnedValue::Float(*acc as f64 * f);
-                                    }
-                                    _ => {
-                                        todo!("{:?}", aggctx);
-                                    }
+                                    OwnedValue::Float(acc) => programState.registers[dest] = OwnedValue::Float(acc * f),
+                                    OwnedValue::Integer(acc) => programState.registers[dest] = OwnedValue::Float(*acc as f64 * f),
+                                    _ => todo!("{:?}", aggctx),
                                 },
                                 OwnedValue::Agg(aggctx2) => {
                                     let acc = aggctx.final_value();
                                     let acc2 = aggctx2.final_value();
                                     match (acc, acc2) {
-                                        (OwnedValue::Integer(acc), OwnedValue::Integer(acc2)) => {
-                                            programState.registers[dest] = OwnedValue::Integer(acc * acc2);
-                                        }
-                                        (OwnedValue::Float(acc), OwnedValue::Float(acc2)) => {
-                                            programState.registers[dest] = OwnedValue::Float(acc * acc2);
-                                        }
-                                        (OwnedValue::Integer(acc), OwnedValue::Float(acc2)) => {
-                                            programState.registers[dest] =
-                                                OwnedValue::Float(*acc as f64 * acc2);
-                                        }
-                                        (OwnedValue::Float(acc), OwnedValue::Integer(acc2)) => {
-                                            programState.registers[dest] =
-                                                OwnedValue::Float(acc * *acc2 as f64);
-                                        }
-                                        _ => {
-                                            todo!("{:?} {:?}", acc, acc2);
-                                        }
+                                        (OwnedValue::Integer(acc), OwnedValue::Integer(acc2)) => programState.registers[dest] = OwnedValue::Integer(acc * acc2),
+                                        (OwnedValue::Float(acc), OwnedValue::Float(acc2)) => programState.registers[dest] = OwnedValue::Float(acc * acc2),
+                                        (OwnedValue::Integer(acc), OwnedValue::Float(acc2)) => programState.registers[dest] = OwnedValue::Float(*acc as f64 * acc2),
+                                        (OwnedValue::Float(acc), OwnedValue::Integer(acc2)) => programState.registers[dest] = OwnedValue::Float(acc * *acc2 as f64),
+                                        _ => todo!("{:?} {:?}", acc, acc2),
                                     }
                                 }
                                 rest => unimplemented!("{:?}", rest),
                             }
                         }
-                        others => {
-                            todo!("{:?}", others);
-                        }
+                        others => todo!("{:?}", others),
                     }
                     programState.pc += 1;
                 }
@@ -878,106 +750,52 @@ impl Program {
                     let dest = *dest;
                     match (&programState.registers[lhs], &programState.registers[rhs]) {
                         // If the divisor is zero, the result is NULL.
-                        (_, OwnedValue::Integer(0)) | (_, OwnedValue::Float(0.0)) => {
-                            programState.registers[dest] = OwnedValue::Null;
-                        }
-                        (OwnedValue::Integer(lhs), OwnedValue::Integer(rhs)) => {
-                            programState.registers[dest] = OwnedValue::Integer(lhs / rhs);
-                        }
-                        (OwnedValue::Float(lhs), OwnedValue::Float(rhs)) => {
-                            programState.registers[dest] = OwnedValue::Float(lhs / rhs);
-                        }
-                        (OwnedValue::Float(lhs), OwnedValue::Integer(rhs)) => {
-                            programState.registers[dest] = OwnedValue::Float(lhs / *rhs as f64);
-                        }
-                        (OwnedValue::Integer(lhs), OwnedValue::Float(rhs)) => {
-                            programState.registers[dest] = OwnedValue::Float(*lhs as f64 / rhs);
-                        }
-                        (OwnedValue::Null, _) | (_, OwnedValue::Null) => {
-                            programState.registers[dest] = OwnedValue::Null;
-                        }
+                        (_, OwnedValue::Integer(0)) | (_, OwnedValue::Float(0.0)) => programState.registers[dest] = OwnedValue::Null,
+                        (OwnedValue::Integer(lhs), OwnedValue::Integer(rhs)) => programState.registers[dest] = OwnedValue::Integer(lhs / rhs),
+                        (OwnedValue::Float(lhs), OwnedValue::Float(rhs)) => programState.registers[dest] = OwnedValue::Float(lhs / rhs),
+                        (OwnedValue::Float(lhs), OwnedValue::Integer(rhs)) => programState.registers[dest] = OwnedValue::Float(lhs / *rhs as f64),
+                        (OwnedValue::Integer(lhs), OwnedValue::Float(rhs)) => programState.registers[dest] = OwnedValue::Float(*lhs as f64 / rhs),
+                        (OwnedValue::Null, _) | (_, OwnedValue::Null) => programState.registers[dest] = OwnedValue::Null,
                         (OwnedValue::Agg(aggctx), rhs) => match rhs {
-                            OwnedValue::Null => {
-                                programState.registers[dest] = OwnedValue::Null;
-                            }
+                            OwnedValue::Null => programState.registers[dest] = OwnedValue::Null,
                             OwnedValue::Integer(i) => match aggctx.final_value() {
-                                OwnedValue::Float(acc) => {
-                                    programState.registers[dest] = OwnedValue::Float(acc / *i as f64);
-                                }
-                                OwnedValue::Integer(acc) => {
-                                    programState.registers[dest] = OwnedValue::Integer(acc / i);
-                                }
-                                _ => {
-                                    todo!("{:?}", aggctx);
-                                }
+                                OwnedValue::Float(acc) => programState.registers[dest] = OwnedValue::Float(acc / *i as f64),
+                                OwnedValue::Integer(acc) => programState.registers[dest] = OwnedValue::Integer(acc / i),
+                                _ => todo!("{:?}", aggctx),
                             },
                             OwnedValue::Float(f) => match aggctx.final_value() {
-                                OwnedValue::Float(acc) => {
-                                    programState.registers[dest] = OwnedValue::Float(acc / f);
-                                }
-                                OwnedValue::Integer(acc) => {
-                                    programState.registers[dest] = OwnedValue::Float(*acc as f64 / f);
-                                }
-                                _ => {
-                                    todo!("{:?}", aggctx);
-                                }
+                                OwnedValue::Float(acc) => programState.registers[dest] = OwnedValue::Float(acc / f),
+                                OwnedValue::Integer(acc) => programState.registers[dest] = OwnedValue::Float(*acc as f64 / f),
+                                _ => todo!("{:?}", aggctx),
                             },
                             OwnedValue::Agg(aggctx2) => {
                                 let acc = aggctx.final_value();
                                 let acc2 = aggctx2.final_value();
                                 match (acc, acc2) {
-                                    (OwnedValue::Integer(acc), OwnedValue::Integer(acc2)) => {
-                                        programState.registers[dest] = OwnedValue::Integer(acc / acc2);
-                                    }
-                                    (OwnedValue::Float(acc), OwnedValue::Float(acc2)) => {
-                                        programState.registers[dest] = OwnedValue::Float(acc / acc2);
-                                    }
-                                    (OwnedValue::Integer(acc), OwnedValue::Float(acc2)) => {
-                                        programState.registers[dest] =
-                                            OwnedValue::Float(*acc as f64 / acc2);
-                                    }
-                                    (OwnedValue::Float(acc), OwnedValue::Integer(acc2)) => {
-                                        programState.registers[dest] =
-                                            OwnedValue::Float(acc / *acc2 as f64);
-                                    }
-                                    _ => {
-                                        todo!("{:?} {:?}", acc, acc2);
-                                    }
+                                    (OwnedValue::Integer(acc), OwnedValue::Integer(acc2)) => programState.registers[dest] = OwnedValue::Integer(acc / acc2),
+                                    (OwnedValue::Float(acc), OwnedValue::Float(acc2)) => programState.registers[dest] = OwnedValue::Float(acc / acc2),
+                                    (OwnedValue::Integer(acc), OwnedValue::Float(acc2)) => programState.registers[dest] = OwnedValue::Float(*acc as f64 / acc2),
+                                    (OwnedValue::Float(acc), OwnedValue::Integer(acc2)) => programState.registers[dest] = OwnedValue::Float(acc / *acc2 as f64),
+                                    _ => todo!("{:?} {:?}", acc, acc2),
                                 }
                             }
                             rest => unimplemented!("{:?}", rest),
                         },
                         (lhs, OwnedValue::Agg(aggctx)) => match lhs {
-                            OwnedValue::Null => {
-                                programState.registers[dest] = OwnedValue::Null;
-                            }
+                            OwnedValue::Null => programState.registers[dest] = OwnedValue::Null,
                             OwnedValue::Integer(i) => match aggctx.final_value() {
-                                OwnedValue::Float(acc) => {
-                                    programState.registers[dest] = OwnedValue::Float(*i as f64 / acc);
-                                }
-                                OwnedValue::Integer(acc) => {
-                                    programState.registers[dest] = OwnedValue::Integer(i / acc);
-                                }
-                                _ => {
-                                    todo!("{:?}", aggctx);
-                                }
+                                OwnedValue::Float(acc) => programState.registers[dest] = OwnedValue::Float(*i as f64 / acc),
+                                OwnedValue::Integer(acc) => programState.registers[dest] = OwnedValue::Integer(i / acc),
+                                _ => todo!("{:?}", aggctx),
                             },
                             OwnedValue::Float(f) => match aggctx.final_value() {
-                                OwnedValue::Float(acc) => {
-                                    programState.registers[dest] = OwnedValue::Float(f / acc);
-                                }
-                                OwnedValue::Integer(acc) => {
-                                    programState.registers[dest] = OwnedValue::Float(f / *acc as f64);
-                                }
-                                _ => {
-                                    todo!("{:?}", aggctx);
-                                }
+                                OwnedValue::Float(acc) => programState.registers[dest] = OwnedValue::Float(f / acc),
+                                OwnedValue::Integer(acc) => programState.registers[dest] = OwnedValue::Float(f / *acc as f64),
+                                _ => todo!("{:?}", aggctx),
                             },
                             rest => unimplemented!("{:?}", rest),
                         },
-                        others => {
-                            todo!("{:?}", others);
-                        }
+                        others => todo!("{:?}", others),
                     }
                     programState.pc += 1;
                 }
@@ -990,10 +808,7 @@ impl Program {
                         (OwnedValue::Null, _) | (_, OwnedValue::Null) => {
                             programState.registers[dest] = OwnedValue::Null;
                         }
-                        (_, OwnedValue::Integer(0))
-                        | (OwnedValue::Integer(0), _)
-                        | (_, OwnedValue::Float(0.0))
-                        | (OwnedValue::Float(0.0), _) => {
+                        (_, OwnedValue::Integer(0)) | (OwnedValue::Integer(0), _) | (_, OwnedValue::Float(0.0)) | (OwnedValue::Float(0.0), _) => {
                             programState.registers[dest] = OwnedValue::Integer(0);
                         }
                         (OwnedValue::Integer(lh), OwnedValue::Integer(rh)) => {
@@ -1027,45 +842,20 @@ impl Program {
                                             programState.registers[dest] =
                                                 OwnedValue::Integer(*lh as i64 & rh);
                                         }
-                                        _ => {
-                                            unimplemented!(
-                                                "{:?} {:?}",
-                                                aggctx.final_value(),
-                                                aggctx2.final_value()
-                                            );
-                                        }
+                                        _ => unimplemented!("{:?} {:?}", aggctx.final_value(), aggctx2.final_value()),
                                     }
                                 }
                                 other => match (aggctx.final_value(), other) {
-                                    (OwnedValue::Null, _) | (_, OwnedValue::Null) => {
-                                        programState.registers[dest] = OwnedValue::Null;
-                                    }
-                                    (_, OwnedValue::Integer(0))
-                                    | (OwnedValue::Integer(0), _)
-                                    | (_, OwnedValue::Float(0.0))
-                                    | (OwnedValue::Float(0.0), _) => {
-                                        programState.registers[dest] = OwnedValue::Integer(0);
-                                    }
-                                    (OwnedValue::Integer(lh), OwnedValue::Integer(rh)) => {
-                                        programState.registers[dest] = OwnedValue::Integer(lh & rh);
-                                    }
-                                    (OwnedValue::Float(lh), OwnedValue::Integer(rh)) => {
-                                        programState.registers[dest] =
-                                            OwnedValue::Integer(*lh as i64 & rh);
-                                    }
-                                    (OwnedValue::Integer(lh), OwnedValue::Float(rh)) => {
-                                        programState.registers[dest] =
-                                            OwnedValue::Integer(lh & *rh as i64);
-                                    }
-                                    _ => {
-                                        unimplemented!("{:?} {:?}", aggctx.final_value(), other);
-                                    }
+                                    (OwnedValue::Null, _) | (_, OwnedValue::Null) => programState.registers[dest] = OwnedValue::Null,
+                                    (_, OwnedValue::Integer(0)) | (OwnedValue::Integer(0), _) | (_, OwnedValue::Float(0.0)) | (OwnedValue::Float(0.0), _) => programState.registers[dest] = OwnedValue::Integer(0),
+                                    (OwnedValue::Integer(lh), OwnedValue::Integer(rh)) => programState.registers[dest] = OwnedValue::Integer(lh & rh),
+                                    (OwnedValue::Float(lh), OwnedValue::Integer(rh)) => programState.registers[dest] = OwnedValue::Integer(*lh as i64 & rh),
+                                    (OwnedValue::Integer(lh), OwnedValue::Float(rh)) => programState.registers[dest] = OwnedValue::Integer(lh & *rh as i64),
+                                    _ => unimplemented!("{:?} {:?}", aggctx.final_value(), other),
                                 },
                             }
                         }
-                        _ => {
-                            unimplemented!("{:?} {:?}", programState.registers[lhs], programState.registers[rhs]);
-                        }
+                        _ => unimplemented!("{:?} {:?}", programState.registers[lhs], programState.registers[rhs]),
                     }
                     programState.pc += 1;
                 }
@@ -1074,71 +864,34 @@ impl Program {
                     let rhs = *rhs;
                     let dest = *dest;
                     match (&programState.registers[lhs], &programState.registers[rhs]) {
-                        (OwnedValue::Null, _) | (_, OwnedValue::Null) => {
-                            programState.registers[dest] = OwnedValue::Null;
-                        }
-                        (OwnedValue::Integer(lh), OwnedValue::Integer(rh)) => {
-                            programState.registers[dest] = OwnedValue::Integer(lh | rh);
-                        }
-                        (OwnedValue::Float(lh), OwnedValue::Integer(rh)) => {
-                            programState.registers[dest] = OwnedValue::Integer(*lh as i64 | rh);
-                        }
-                        (OwnedValue::Integer(lh), OwnedValue::Float(rh)) => {
-                            programState.registers[dest] = OwnedValue::Integer(lh | *rh as i64);
-                        }
-                        (OwnedValue::Float(lh), OwnedValue::Float(rh)) => {
-                            programState.registers[dest] = OwnedValue::Integer(*lh as i64 | *rh as i64);
-                        }
+                        (OwnedValue::Null, _) | (_, OwnedValue::Null) => programState.registers[dest] = OwnedValue::Null,
+                        (OwnedValue::Integer(lh), OwnedValue::Integer(rh)) => programState.registers[dest] = OwnedValue::Integer(lh | rh),
+                        (OwnedValue::Float(lh), OwnedValue::Integer(rh)) => programState.registers[dest] = OwnedValue::Integer(*lh as i64 | rh),
+                        (OwnedValue::Integer(lh), OwnedValue::Float(rh)) => programState.registers[dest] = OwnedValue::Integer(lh | *rh as i64),
+                        (OwnedValue::Float(lh), OwnedValue::Float(rh)) => programState.registers[dest] = OwnedValue::Integer(*lh as i64 | *rh as i64),
                         (OwnedValue::Agg(aggctx), other) | (other, OwnedValue::Agg(aggctx)) => {
                             match other {
                                 OwnedValue::Agg(aggctx2) => {
                                     let final_lhs = aggctx.final_value();
                                     let final_rhs = aggctx2.final_value();
                                     match (final_lhs, final_rhs) {
-                                        (OwnedValue::Integer(lh), OwnedValue::Integer(rh)) => {
-                                            programState.registers[dest] = OwnedValue::Integer(lh | rh);
-                                        }
-                                        (OwnedValue::Float(lh), OwnedValue::Float(rh)) => {
-                                            programState.registers[dest] =
-                                                OwnedValue::Integer(*lh as i64 | *rh as i64);
-                                        }
-                                        (OwnedValue::Integer(lh), OwnedValue::Float(rh)) => {
-                                            programState.registers[dest] =
-                                                OwnedValue::Integer(lh | *rh as i64);
-                                        }
-                                        (OwnedValue::Float(lh), OwnedValue::Integer(rh)) => {
-                                            programState.registers[dest] =
-                                                OwnedValue::Integer(*lh as i64 | rh);
-                                        }
-                                        _ => {
-                                            unimplemented!("{:?} {:?}", final_lhs, final_rhs);
-                                        }
+                                        (OwnedValue::Integer(lh), OwnedValue::Integer(rh)) => programState.registers[dest] = OwnedValue::Integer(lh | rh),
+                                        (OwnedValue::Float(lh), OwnedValue::Float(rh)) => programState.registers[dest] = OwnedValue::Integer(*lh as i64 | *rh as i64),
+                                        (OwnedValue::Integer(lh), OwnedValue::Float(rh)) => programState.registers[dest] = OwnedValue::Integer(lh | *rh as i64),
+                                        (OwnedValue::Float(lh), OwnedValue::Integer(rh)) => programState.registers[dest] = OwnedValue::Integer(*lh as i64 | rh),
+                                        _ => unimplemented!("{:?} {:?}", final_lhs, final_rhs),
                                     }
                                 }
                                 other => match (aggctx.final_value(), other) {
-                                    (OwnedValue::Null, _) | (_, OwnedValue::Null) => {
-                                        programState.registers[dest] = OwnedValue::Null;
-                                    }
-                                    (OwnedValue::Integer(lh), OwnedValue::Integer(rh)) => {
-                                        programState.registers[dest] = OwnedValue::Integer(lh | rh);
-                                    }
-                                    (OwnedValue::Float(lh), OwnedValue::Integer(rh)) => {
-                                        programState.registers[dest] =
-                                            OwnedValue::Integer(*lh as i64 | rh);
-                                    }
-                                    (OwnedValue::Integer(lh), OwnedValue::Float(rh)) => {
-                                        programState.registers[dest] =
-                                            OwnedValue::Integer(lh | *rh as i64);
-                                    }
-                                    _ => {
-                                        unimplemented!("{:?} {:?}", aggctx.final_value(), other);
-                                    }
+                                    (OwnedValue::Null, _) | (_, OwnedValue::Null) => programState.registers[dest] = OwnedValue::Null,
+                                    (OwnedValue::Integer(lh), OwnedValue::Integer(rh)) => programState.registers[dest] = OwnedValue::Integer(lh | rh),
+                                    (OwnedValue::Float(lh), OwnedValue::Integer(rh)) => programState.registers[dest] = OwnedValue::Integer(*lh as i64 | rh),
+                                    (OwnedValue::Integer(lh), OwnedValue::Float(rh)) => programState.registers[dest] = OwnedValue::Integer(lh | *rh as i64),
+                                    _ => unimplemented!("{:?} {:?}", aggctx.final_value(), other),
                                 },
                             }
                         }
-                        _ => {
-                            unimplemented!("{:?} {:?}", programState.registers[lhs], programState.registers[rhs]);
-                        }
+                        _ => unimplemented!("{:?} {:?}", programState.registers[lhs], programState.registers[rhs]),
                     }
                     programState.pc += 1;
                 }
@@ -1147,27 +900,15 @@ impl Program {
                     let dest = *dest;
                     match &programState.registers[reg] {
                         OwnedValue::Integer(i) => programState.registers[dest] = OwnedValue::Integer(!i),
-                        OwnedValue::Float(f) => {
-                            programState.registers[dest] = OwnedValue::Integer(!{ *f as i64 })
-                        }
-                        OwnedValue::Null => {
-                            programState.registers[dest] = OwnedValue::Null;
-                        }
+                        OwnedValue::Float(f) => programState.registers[dest] = OwnedValue::Integer(!{ *f as i64 }),
+                        OwnedValue::Null => programState.registers[dest] = OwnedValue::Null,
                         OwnedValue::Agg(aggctx) => match aggctx.final_value() {
-                            OwnedValue::Integer(i) => {
-                                programState.registers[dest] = OwnedValue::Integer(!i);
-                            }
-                            OwnedValue::Float(f) => {
-                                programState.registers[dest] = OwnedValue::Integer(!{ *f as i64 });
-                            }
-                            OwnedValue::Null => {
-                                programState.registers[dest] = OwnedValue::Null;
-                            }
+                            OwnedValue::Integer(i) => programState.registers[dest] = OwnedValue::Integer(!i),
+                            OwnedValue::Float(f) => programState.registers[dest] = OwnedValue::Integer(!{ *f as i64 }),
+                            OwnedValue::Null => programState.registers[dest] = OwnedValue::Null,
                             _ => unimplemented!("{:?}", aggctx),
                         },
-                        _ => {
-                            unimplemented!("{:?}", programState.registers[reg]);
-                        }
+                        _ => unimplemented!("{:?}", programState.registers[reg]),
                     }
                     programState.pc += 1;
                 }
@@ -1186,11 +927,7 @@ impl Program {
                     cursor.set_null_flag(true);
                     programState.pc += 1;
                 }
-                Insn::Compare {
-                    start_reg_a,
-                    start_reg_b,
-                    count,
-                } => {
+                Insn::Compare { start_reg_a, start_reg_b, count } => {
                     let start_reg_a = *start_reg_a;
                     let start_reg_b = *start_reg_b;
                     let count = *count;
@@ -1295,9 +1032,7 @@ impl Program {
                     let rhs = *rhs;
                     let target_pc = *target_pc;
                     match (&programState.registers[lhs], &programState.registers[rhs]) {
-                        (_, OwnedValue::Null) | (OwnedValue::Null, _) => {
-                            programState.pc = target_pc;
-                        }
+                        (_, OwnedValue::Null) | (OwnedValue::Null, _) => programState.pc = target_pc,
                         _ => {
                             if programState.registers[lhs] == programState.registers[rhs] {
                                 programState.pc = target_pc;
@@ -1317,9 +1052,7 @@ impl Program {
                     let rhs = *rhs;
                     let target_pc = *target_pc;
                     match (&programState.registers[lhs], &programState.registers[rhs]) {
-                        (_, OwnedValue::Null) | (OwnedValue::Null, _) => {
-                            programState.pc = target_pc;
-                        }
+                        (_, OwnedValue::Null) | (OwnedValue::Null, _) => programState.pc = target_pc,
                         _ => {
                             if programState.registers[lhs] != programState.registers[rhs] {
                                 programState.pc = target_pc;
@@ -1451,11 +1184,7 @@ impl Program {
                     programState.pc += 1;
                 }
                 Insn::OpenReadAwait => programState.pc += 1,
-                Insn::OpenPseudo {
-                    cursor_id,
-                    content_reg: _,
-                    num_fields: _,
-                } => {
+                Insn::OpenPseudo { cursor_id, .. } => {
                     let cursor = Box::new(PseudoCursor::new());
                     cursorId2Cursor.insert(*cursor_id, cursor);
                     programState.pc += 1;
@@ -1470,10 +1199,7 @@ impl Program {
                     return_if_io!(cursor.last());
                     programState.pc += 1;
                 }
-                Insn::LastAwait {
-                    cursor_id,
-                    pc_if_empty,
-                } => {
+                Insn::LastAwait { cursor_id, pc_if_empty } => {
                     let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     cursor.wait_for_completion()?;
                     if cursor.is_empty() {
@@ -1482,10 +1208,7 @@ impl Program {
                         programState.pc += 1;
                     }
                 }
-                Insn::RewindAwait {
-                    cursor_id,
-                    pc_if_empty,
-                } => {
+                Insn::RewindAwait { cursor_id, pc_if_empty } => {
                     let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     cursor.wait_for_completion()?;
                     if cursor.is_empty() {
@@ -1573,49 +1296,35 @@ impl Program {
                         programState.pc += 1;
                     }
                 }
-                Insn::Halt {
-                    err_code,
-                    description,
-                } => {
+                Insn::Halt { err_code, description } => {
                     match *err_code {
                         0 => {}
-                        SQLITE_CONSTRAINT_PRIMARYKEY => {
-                            return Err(LimboError::Constraint(format!(
-                                "UNIQUE constraint failed: {} (19)",
-                                description
-                            )));
-                        }
-                        _ => {
-                            return Err(LimboError::Constraint(format!(
-                                "undocumented halt error code {}",
-                                description
-                            )));
-                        }
+                        SQLITE_CONSTRAINT_PRIMARYKEY => return Err(LimboError::Constraint(format!("UNIQUE constraint failed: {} (19)", description))),
+                        _ => return Err(LimboError::Constraint(format!("undocumented halt error code {}", description))),
                     }
-                    log::trace!("Halt auto_commit {}", self.auto_commit);
-                    if self.auto_commit {
-                        return match pager.end_tx() {
+
+                    return if self.auto_commit {
+                        match pager.end_tx() {
                             Ok(crate::storage::wal::CheckpointStatus::IO) => Ok(StepResult::IO),
                             Ok(crate::storage::wal::CheckpointStatus::Done) => Ok(StepResult::Done),
                             Err(e) => Err(e),
-                        };
+                        }
                     } else {
-                        return Ok(StepResult::Done);
-                    }
+                        Ok(StepResult::Done)
+                    };
                 }
                 Insn::Transaction { write } => {
                     let connection = self.conn.upgrade().unwrap();
                     if let Some(db) = connection.db.upgrade() {
-                        // TODO(pere): are backpointers good ?? this looks ugly af
-                        // upgrade transaction if needed
+                        // TODO(pere): are backpointers good ?? this looks ugly af upgrade transaction if needed
                         let new_transaction_state =
                             match (db.transaction_state.borrow().clone(), write) {
-                                (crate::TransactionState::Write, true) => TransactionState::Write,
-                                (crate::TransactionState::Write, false) => TransactionState::Write,
-                                (crate::TransactionState::Read, true) => TransactionState::Write,
-                                (crate::TransactionState::Read, false) => TransactionState::Read,
-                                (crate::TransactionState::None, true) => TransactionState::Read,
-                                (crate::TransactionState::None, false) => TransactionState::Read,
+                                (TransactionState::Write, true) => TransactionState::Write,
+                                (TransactionState::Write, false) => TransactionState::Write,
+                                (TransactionState::Read, true) => TransactionState::Write,
+                                (TransactionState::Read, false) => TransactionState::Read,
+                                (TransactionState::None, true) => TransactionState::Read,
+                                (TransactionState::None, false) => TransactionState::Read,
                             };
                         // TODO(Pere):
                         //  1. lock wal
@@ -1634,10 +1343,7 @@ impl Program {
                     assert!(*target_pc >= 0);
                     programState.pc = *target_pc;
                 }
-                Insn::Gosub {
-                    target_pc,
-                    return_reg,
-                } => {
+                Insn::Gosub { target_pc, return_reg } => {
                     assert!(*target_pc >= 0);
                     programState.registers[*return_reg] = OwnedValue::Integer(programState.pc + 1);
                     programState.pc = *target_pc;
@@ -1750,14 +1456,10 @@ impl Program {
                                 continue;
                             }
                             OwnedValue::Integer(rowid) => *rowid as u64,
-                            _ => {
-                                return Err(LimboError::InternalError(
-                                    "SeekGE: the value in the register is not an integer".into(),
-                                ));
-                            }
+                            _ => return Err(LimboError::InternalError("SeekGE: the value in the register is not an integer".into())),
                         };
-                        let found =
-                            return_if_io!(cursor.seek(SeekKey::TableRowId(rowid), SeekOp::GE));
+
+                        let found = return_if_io!(cursor.seek(SeekKey::TableRowId(rowid), SeekOp::GE));
                         if !found {
                             programState.pc = *target_pc;
                         } else {
@@ -1794,14 +1496,10 @@ impl Program {
                                 continue;
                             }
                             OwnedValue::Integer(rowid) => *rowid as u64,
-                            _ => {
-                                return Err(LimboError::InternalError(
-                                    "SeekGT: the value in the register is not an integer".into(),
-                                ));
-                            }
+                            _ => return Err(LimboError::InternalError("SeekGT: the value in the register is not an integer".into())),
                         };
-                        let found =
-                            return_if_io!(cursor.seek(SeekKey::TableRowId(rowid), SeekOp::GT));
+
+                        let found = return_if_io!(cursor.seek(SeekKey::TableRowId(rowid), SeekOp::GT));
                         if !found {
                             programState.pc = *target_pc;
                         } else {
@@ -1821,9 +1519,7 @@ impl Program {
                         make_owned_record(&programState.registers, start_reg, num_regs);
                     if let Some(ref idx_record) = *cursor.record()? {
                         // omit the rowid from the idx_record, which is the last value
-                        if idx_record.values[..idx_record.values.len() - 1]
-                            >= *record_from_regs.values
-                        {
+                        if idx_record.values[..idx_record.values.len() - 1] >= *record_from_regs.values {
                             programState.pc = *target_pc;
                         } else {
                             programState.pc += 1;
@@ -1839,13 +1535,10 @@ impl Program {
                     target_pc,
                 } => {
                     let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
-                    let record_from_regs: OwnedRecord =
-                        make_owned_record(&programState.registers, start_reg, num_regs);
+                    let record_from_regs: OwnedRecord = make_owned_record(&programState.registers, start_reg, num_regs);
                     if let Some(ref idx_record) = *cursor.record()? {
                         // omit the rowid from the idx_record, which is the last value
-                        if idx_record.values[..idx_record.values.len() - 1]
-                            > *record_from_regs.values
-                        {
+                        if idx_record.values[..idx_record.values.len() - 1] > *record_from_regs.values {
                             programState.pc = *target_pc;
                         } else {
                             programState.pc += 1;
@@ -1877,147 +1570,84 @@ impl Program {
                 } => {
                     if let OwnedValue::Null = &programState.registers[*acc_reg] {
                         programState.registers[*acc_reg] = match func {
-                            AggFunc::Avg => OwnedValue::Agg(Box::new(AggContext::Avg(
-                                OwnedValue::Float(0.0),
-                                OwnedValue::Integer(0),
-                            ))),
-                            AggFunc::Sum => {
-                                OwnedValue::Agg(Box::new(AggContext::Sum(OwnedValue::Null)))
-                            }
+                            AggFunc::Avg => OwnedValue::Agg(Box::new(AggContext::Avg(OwnedValue::Float(0.0), OwnedValue::Integer(0)))),
+                            AggFunc::Sum => OwnedValue::Agg(Box::new(AggContext::Sum(OwnedValue::Null))),
                             AggFunc::Total => {
                                 // The result of total() is always a floating point value.
                                 // No overflow error is ever raised if any prior input was a floating point value.
                                 // Total() never throws an integer overflow.
                                 OwnedValue::Agg(Box::new(AggContext::Sum(OwnedValue::Float(0.0))))
                             }
-                            AggFunc::Count => {
-                                OwnedValue::Agg(Box::new(AggContext::Count(OwnedValue::Integer(0))))
-                            }
+                            AggFunc::Count => OwnedValue::Agg(Box::new(AggContext::Count(OwnedValue::Integer(0)))),
                             AggFunc::Max => {
                                 let col = programState.registers[*col].clone();
                                 match col {
-                                    OwnedValue::Integer(_) => {
-                                        OwnedValue::Agg(Box::new(AggContext::Max(None)))
-                                    }
-                                    OwnedValue::Float(_) => {
-                                        OwnedValue::Agg(Box::new(AggContext::Max(None)))
-                                    }
-                                    OwnedValue::Text(_) => {
-                                        OwnedValue::Agg(Box::new(AggContext::Max(None)))
-                                    }
-                                    _ => {
-                                        unreachable!();
-                                    }
+                                    OwnedValue::Integer(_) => OwnedValue::Agg(Box::new(AggContext::Max(None))),
+                                    OwnedValue::Float(_) => OwnedValue::Agg(Box::new(AggContext::Max(None))),
+                                    OwnedValue::Text(_) => OwnedValue::Agg(Box::new(AggContext::Max(None))),
+                                    _ => unreachable!(),
                                 }
                             }
                             AggFunc::Min => {
                                 let col = programState.registers[*col].clone();
                                 match col {
-                                    OwnedValue::Integer(_) => {
-                                        OwnedValue::Agg(Box::new(AggContext::Min(None)))
-                                    }
-                                    OwnedValue::Float(_) => {
-                                        OwnedValue::Agg(Box::new(AggContext::Min(None)))
-                                    }
-                                    OwnedValue::Text(_) => {
-                                        OwnedValue::Agg(Box::new(AggContext::Min(None)))
-                                    }
-                                    _ => {
-                                        unreachable!();
-                                    }
+                                    OwnedValue::Integer(_) => OwnedValue::Agg(Box::new(AggContext::Min(None))),
+                                    OwnedValue::Float(_) => OwnedValue::Agg(Box::new(AggContext::Min(None))),
+                                    OwnedValue::Text(_) => OwnedValue::Agg(Box::new(AggContext::Min(None))),
+                                    _ => unreachable!(),
                                 }
                             }
-                            AggFunc::GroupConcat | AggFunc::StringAgg => OwnedValue::Agg(Box::new(
-                                AggContext::GroupConcat(OwnedValue::Text(Rc::new("".to_string()))),
-                            )),
+                            AggFunc::GroupConcat | AggFunc::StringAgg => OwnedValue::Agg(Box::new(AggContext::GroupConcat(OwnedValue::Text(Rc::new("".to_string()))))),
                         };
                     }
                     match func {
                         AggFunc::Avg => {
                             let col = programState.registers[*col].clone();
-                            let OwnedValue::Agg(agg) = programState.registers[*acc_reg].borrow_mut()
-                            else {
-                                unreachable!();
-                            };
-                            let AggContext::Avg(acc, count) = agg.borrow_mut() else {
-                                unreachable!();
-                            };
+                            let OwnedValue::Agg(agg) = programState.registers[*acc_reg].borrow_mut() else { unreachable!(); };
+                            let AggContext::Avg(acc, count) = agg.borrow_mut() else { unreachable!(); };
                             *acc += col;
                             *count += 1;
                         }
                         AggFunc::Sum | AggFunc::Total => {
                             let col = programState.registers[*col].clone();
-                            let OwnedValue::Agg(agg) = programState.registers[*acc_reg].borrow_mut()
-                            else {
-                                unreachable!();
-                            };
-                            let AggContext::Sum(acc) = agg.borrow_mut() else {
-                                unreachable!();
-                            };
+                            let OwnedValue::Agg(agg) = programState.registers[*acc_reg].borrow_mut()else { unreachable!(); };
+                            let AggContext::Sum(acc) = agg.borrow_mut() else { unreachable!(); };
                             *acc += col;
                         }
                         AggFunc::Count => {
-                            let OwnedValue::Agg(agg) = programState.registers[*acc_reg].borrow_mut()
-                            else {
-                                unreachable!();
-                            };
-                            let AggContext::Count(count) = agg.borrow_mut() else {
-                                unreachable!();
-                            };
+                            let OwnedValue::Agg(agg) = programState.registers[*acc_reg].borrow_mut()else { unreachable!(); };
+                            let AggContext::Count(count) = agg.borrow_mut() else { unreachable!(); };
                             *count += 1;
                         }
                         AggFunc::Max => {
                             let col = programState.registers[*col].clone();
-                            let OwnedValue::Agg(agg) = programState.registers[*acc_reg].borrow_mut()
-                            else {
-                                unreachable!();
-                            };
-                            let AggContext::Max(acc) = agg.borrow_mut() else {
-                                unreachable!();
-                            };
+                            let OwnedValue::Agg(agg) = programState.registers[*acc_reg].borrow_mut()else { unreachable!(); };
+                            let AggContext::Max(acc) = agg.borrow_mut() else { unreachable!(); };
 
                             match (acc.as_mut(), col) {
-                                (None, value) => {
-                                    *acc = Some(value);
-                                }
-                                (
-                                    Some(OwnedValue::Integer(ref mut current_max)),
-                                    OwnedValue::Integer(value),
-                                ) => {
+                                (None, value) => *acc = Some(value),
+                                (Some(OwnedValue::Integer(ref mut current_max)), OwnedValue::Integer(value), ) => {
                                     if value > *current_max {
                                         *current_max = value;
                                     }
                                 }
-                                (
-                                    Some(OwnedValue::Float(ref mut current_max)),
-                                    OwnedValue::Float(value),
-                                ) => {
+                                (Some(OwnedValue::Float(ref mut current_max)), OwnedValue::Float(value), ) => {
                                     if value > *current_max {
                                         *current_max = value;
                                     }
                                 }
-                                (
-                                    Some(OwnedValue::Text(ref mut current_max)),
-                                    OwnedValue::Text(value),
-                                ) => {
+                                (Some(OwnedValue::Text(ref mut current_max)), OwnedValue::Text(value), ) => {
                                     if value > *current_max {
                                         *current_max = value;
                                     }
                                 }
-                                _ => {
-                                    eprintln!("Unexpected types in max aggregation");
-                                }
+                                _ => eprintln!("Unexpected types in max aggregation"),
                             }
                         }
                         AggFunc::Min => {
                             let col = programState.registers[*col].clone();
-                            let OwnedValue::Agg(agg) = programState.registers[*acc_reg].borrow_mut()
-                            else {
-                                unreachable!();
-                            };
-                            let AggContext::Min(acc) = agg.borrow_mut() else {
-                                unreachable!();
-                            };
+                            let OwnedValue::Agg(agg) = programState.registers[*acc_reg].borrow_mut()else { unreachable!(); };
+                            let AggContext::Min(acc) = agg.borrow_mut() else { unreachable!(); };
 
                             match (acc.as_mut(), col) {
                                 (None, value) => *acc.borrow_mut() = Some(value),
@@ -2036,21 +1666,14 @@ impl Program {
                                         *current_min = value;
                                     }
                                 }
-                                _ => {
-                                    eprintln!("Unexpected types in min aggregation");
-                                }
+                                _ => eprintln!("Unexpected types in min aggregation"),
                             }
                         }
                         AggFunc::GroupConcat | AggFunc::StringAgg => {
                             let col = programState.registers[*col].clone();
                             let delimiter = programState.registers[*delimiter].clone();
-                            let OwnedValue::Agg(agg) = programState.registers[*acc_reg].borrow_mut()
-                            else {
-                                unreachable!();
-                            };
-                            let AggContext::GroupConcat(acc) = agg.borrow_mut() else {
-                                unreachable!();
-                            };
+                            let OwnedValue::Agg(agg) = programState.registers[*acc_reg].borrow_mut()else { unreachable!(); };
+                            let AggContext::GroupConcat(acc) = agg.borrow_mut() else { unreachable!(); };
                             if acc.to_string().is_empty() {
                                 *acc = col;
                             } else {
@@ -2066,9 +1689,7 @@ impl Program {
                         OwnedValue::Agg(agg) => {
                             match func {
                                 AggFunc::Avg => {
-                                    let AggContext::Avg(acc, count) = agg.borrow_mut() else {
-                                        unreachable!();
-                                    };
+                                    let AggContext::Avg(acc, count) = agg.borrow_mut() else { unreachable!(); };
                                     *acc /= count.clone();
                                 }
                                 AggFunc::Sum | AggFunc::Total => {}
@@ -2117,10 +1738,7 @@ impl Program {
                     sorter_cursor.insert(&OwnedValue::Integer(0), &record, false)?; // fix key later
                     programState.pc += 1;
                 }
-                Insn::SorterInsert {
-                    cursor_id,
-                    record_reg,
-                } => {
+                Insn::SorterInsert { cursor_id, record_reg } => {
                     let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     let record = match &programState.registers[*record_reg] {
                         OwnedValue::Record(record) => record,
@@ -2130,10 +1748,7 @@ impl Program {
                     cursor.insert(&OwnedValue::Integer(0), record, false)?;
                     programState.pc += 1;
                 }
-                Insn::SorterSort {
-                    cursor_id,
-                    pc_if_empty,
-                } => {
+                Insn::SorterSort { cursor_id, pc_if_empty } => {
                     if let Some(cursor) = cursorId2Cursor.get_mut(cursor_id) {
                         cursor.rewind()?;
                         programState.pc += 1;
@@ -2141,10 +1756,7 @@ impl Program {
                         programState.pc = *pc_if_empty;
                     }
                 }
-                Insn::SorterNext {
-                    cursor_id,
-                    pc_if_next,
-                } => {
+                Insn::SorterNext { cursor_id, pc_if_next } => {
                     assert!(*pc_if_next >= 0);
                     let cursor = cursorId2Cursor.get_mut(cursor_id).unwrap();
                     return_if_io!(cursor.next());
@@ -2164,35 +1776,20 @@ impl Program {
                     match &func.func {
                         crate::function::Func::Scalar(scalar_func) => match scalar_func {
                             ScalarFunc::Cast => {
-                                assert!(arg_count == 2);
+                                assert_eq!(arg_count, 2);
                                 assert!(*start_reg + 1 < programState.registers.len());
                                 let reg_value_argument = programState.registers[*start_reg].clone();
-                                let OwnedValue::Text(reg_value_type) =
-                                    programState.registers[*start_reg + 1].clone()
-                                else {
-                                    unreachable!("Cast with non-text type");
-                                };
+                                let OwnedValue::Text(reg_value_type) = programState.registers[*start_reg + 1].clone()else { unreachable!("Cast with non-text type"); };
                                 let result = exec_cast(&reg_value_argument, &reg_value_type);
                                 programState.registers[*dest] = result;
                             }
                             ScalarFunc::Char => {
-                                let reg_values =
-                                    programState.registers[*start_reg..*start_reg + arg_count].to_vec();
+                                let reg_values = programState.registers[*start_reg..*start_reg + arg_count].to_vec();
                                 programState.registers[*dest] = exec_char(reg_values);
                             }
                             ScalarFunc::Coalesce => {}
-                            ScalarFunc::Concat => {
-                                let result = exec_concat(
-                                    &programState.registers[*start_reg..*start_reg + arg_count],
-                                );
-                                programState.registers[*dest] = result;
-                            }
-                            ScalarFunc::ConcatWs => {
-                                let result = exec_concat_ws(
-                                    &programState.registers[*start_reg..*start_reg + arg_count],
-                                );
-                                programState.registers[*dest] = result;
-                            }
+                            ScalarFunc::Concat => programState.registers[*dest] = exec_concat(&programState.registers[*start_reg..*start_reg + arg_count]),
+                            ScalarFunc::ConcatWs => programState.registers[*dest] = exec_concat_ws(&programState.registers[*start_reg..*start_reg + arg_count]),
                             ScalarFunc::Glob => {
                                 let pattern = &programState.registers[*start_reg];
                                 let text = &programState.registers[*start_reg + 1];
@@ -2205,9 +1802,7 @@ impl Program {
                                         };
                                         OwnedValue::Integer(exec_glob(cache, pattern, text) as i64)
                                     }
-                                    _ => {
-                                        unreachable!("Like on non-text registers");
-                                    }
+                                    _ => unreachable!("Like on non-text registers"),
                                 };
                                 programState.registers[*dest] = result;
                             }
@@ -2221,8 +1816,7 @@ impl Program {
                             }
                             ScalarFunc::LastInsertRowid => {
                                 if let Some(conn) = self.conn.upgrade() {
-                                    programState.registers[*dest] =
-                                        OwnedValue::Integer(conn.last_insert_rowid() as i64);
+                                    programState.registers[*dest] = OwnedValue::Integer(conn.last_insert_rowid() as i64);
                                 } else {
                                     programState.registers[*dest] = OwnedValue::Null;
                                 }
@@ -2239,9 +1833,7 @@ impl Program {
                                         };
                                         OwnedValue::Integer(exec_like(cache, pattern, text) as i64)
                                     }
-                                    _ => {
-                                        unreachable!("Like on non-text registers");
-                                    }
+                                    _ => unreachable!("Like on non-text registers"),
                                 };
                                 programState.registers[*dest] = result;
                             }
@@ -2286,9 +1878,7 @@ impl Program {
                                 let result = exec_unhex(&reg_value, ignored_chars);
                                 programState.registers[*dest] = result;
                             }
-                            ScalarFunc::Random => {
-                                programState.registers[*dest] = exec_random();
-                            }
+                            ScalarFunc::Random => programState.registers[*dest] = exec_random(),
                             ScalarFunc::Trim => {
                                 let reg_value = programState.registers[*start_reg].clone();
                                 let pattern_value = programState.registers.get(*start_reg + 1).cloned();
@@ -2319,17 +1909,11 @@ impl Program {
                                 programState.registers[*dest] = result;
                             }
                             ScalarFunc::Min => {
-                                let reg_values = programState.registers
-                                    [*start_reg..*start_reg + arg_count]
-                                    .iter()
-                                    .collect();
+                                let reg_values = programState.registers[*start_reg..*start_reg + arg_count].iter().collect();
                                 programState.registers[*dest] = exec_min(reg_values);
                             }
                             ScalarFunc::Max => {
-                                let reg_values = programState.registers
-                                    [*start_reg..*start_reg + arg_count]
-                                    .iter()
-                                    .collect();
+                                let reg_values = programState.registers[*start_reg..*start_reg + arg_count].iter().collect();
                                 programState.registers[*dest] = exec_max(reg_values);
                             }
                             ScalarFunc::Nullif => {
@@ -2344,107 +1928,76 @@ impl Program {
                                 let result = exec_substring(str_value, start_value, length_value);
                                 programState.registers[*dest] = result;
                             }
-                            ScalarFunc::Date => {
-                                let result =
-                                    exec_date(&programState.registers[*start_reg..*start_reg + arg_count]);
-                                programState.registers[*dest] = result;
-                            }
+                            ScalarFunc::Date => programState.registers[*dest] = exec_date(&programState.registers[*start_reg..*start_reg + arg_count]),
                             ScalarFunc::Time => {
-                                let result =
-                                    exec_time(&programState.registers[*start_reg..*start_reg + arg_count]);
+                                let result = exec_time(&programState.registers[*start_reg..*start_reg + arg_count]);
                                 programState.registers[*dest] = result;
                             }
                             ScalarFunc::UnixEpoch => {
                                 if *start_reg == 0 {
-                                    let unixepoch: String = exec_unixepoch(&OwnedValue::Text(
-                                        Rc::new("now".to_string()),
-                                    ))?;
+                                    let unixepoch: String = exec_unixepoch(&OwnedValue::Text(Rc::new("now".to_string())))?;
                                     programState.registers[*dest] = OwnedValue::Text(Rc::new(unixepoch));
                                 } else {
                                     let datetime_value = &programState.registers[*start_reg];
                                     let unixepoch = exec_unixepoch(datetime_value);
                                     match unixepoch {
-                                        Ok(time) => {
-                                            programState.registers[*dest] = OwnedValue::Text(Rc::new(time))
-                                        }
-                                        Err(e) => {
-                                            return Err(LimboError::ParseError(format!(
-                                                "Error encountered while parsing datetime value: {}",
-                                                e
-                                            )));
-                                        }
+                                        Ok(time) => programState.registers[*dest] = OwnedValue::Text(Rc::new(time)),
+                                        Err(e) => return Err(LimboError::ParseError(format!("Error encountered while parsing datetime value: {}", e))),
                                     }
                                 }
                             }
                             ScalarFunc::SqliteVersion => {
-                                let version_integer: i64 =
-                                    DATABASE_VERSION.get().unwrap().parse()?;
+                                let version_integer: i64 = DATABASE_VERSION.get().unwrap().parse()?;
                                 let version = execute_sqlite_version(version_integer);
                                 programState.registers[*dest] = OwnedValue::Text(Rc::new(version));
                             }
                             ScalarFunc::Replace => {
-                                assert!(arg_count == 3);
+                                assert_eq!(arg_count, 3);
                                 let source = &programState.registers[*start_reg];
                                 let pattern = &programState.registers[*start_reg + 1];
                                 let replacement = &programState.registers[*start_reg + 2];
                                 programState.registers[*dest] = exec_replace(source, pattern, replacement);
                             }
                         },
-                        crate::function::Func::Math(math_func) => match math_func.arity() {
-                            MathFuncArity::Nullary => match math_func {
-                                MathFunc::Pi => {
-                                    programState.registers[*dest] =
-                                        OwnedValue::Float(std::f64::consts::PI);
-                                }
-                                _ => {
-                                    unreachable!(
-                                        "Unexpected mathematical Nullary function {:?}",
-                                        math_func
-                                    );
-                                }
-                            },
-
-                            MathFuncArity::Unary => {
-                                let reg_value = &programState.registers[*start_reg];
-                                let result = exec_math_unary(reg_value, math_func);
-                                programState.registers[*dest] = result;
-                            }
-
-                            MathFuncArity::Binary => {
-                                let lhs = &programState.registers[*start_reg];
-                                let rhs = &programState.registers[*start_reg + 1];
-                                let result = exec_math_binary(lhs, rhs, math_func);
-                                programState.registers[*dest] = result;
-                            }
-
-                            MathFuncArity::UnaryOrBinary => match math_func {
-                                MathFunc::Log => {
-                                    let result = match arg_count {
-                                        1 => {
-                                            let arg = &programState.registers[*start_reg];
-                                            exec_math_log(arg, None)
-                                        }
-                                        2 => {
-                                            let base = &programState.registers[*start_reg];
-                                            let arg = &programState.registers[*start_reg + 1];
-                                            exec_math_log(arg, Some(base))
-                                        }
-                                        _ => unreachable!(
-                                            "{:?} function with unexpected number of arguments",
-                                            math_func
-                                        ),
-                                    };
+                        crate::function::Func::Math(math_func) =>
+                            match math_func.arity() {
+                                MathFuncArity::Nullary =>
+                                    match math_func {
+                                        MathFunc::Pi => programState.registers[*dest] = OwnedValue::Float(std::f64::consts::PI),
+                                        _ => unreachable!("Unexpected mathematical Nullary function {:?}", math_func),
+                                    }
+                                MathFuncArity::Unary => {
+                                    let reg_value = &programState.registers[*start_reg];
+                                    let result = exec_math_unary(reg_value, math_func);
                                     programState.registers[*dest] = result;
                                 }
-                                _ => unreachable!(
-                                    "Unexpected mathematical UnaryOrBinary function {:?}",
-                                    math_func
-                                ),
+                                MathFuncArity::Binary => {
+                                    let lhs = &programState.registers[*start_reg];
+                                    let rhs = &programState.registers[*start_reg + 1];
+                                    let result = exec_math_binary(lhs, rhs, math_func);
+                                    programState.registers[*dest] = result;
+                                }
+
+                                MathFuncArity::UnaryOrBinary => match math_func {
+                                    MathFunc::Log => {
+                                        let result = match arg_count {
+                                            1 => {
+                                                let arg = &programState.registers[*start_reg];
+                                                exec_math_log(arg, None)
+                                            }
+                                            2 => {
+                                                let base = &programState.registers[*start_reg];
+                                                let arg = &programState.registers[*start_reg + 1];
+                                                exec_math_log(arg, Some(base))
+                                            }
+                                            _ => unreachable!("{:?} function with unexpected number of arguments", math_func),
+                                        };
+                                        programState.registers[*dest] = result;
+                                    }
+                                    _ => unreachable!("Unexpected mathematical UnaryOrBinary function {:?}", math_func),
+                                },
                             },
-                        },
-                        crate::function::Func::Agg(_) => {
-                            unreachable!("Aggregate functions should not be handled here")
-                        }
+                        crate::function::Func::Agg(_) => unreachable!("Aggregate functions should not be handled here"),
                     }
                     programState.pc += 1;
                 }
@@ -2464,10 +2017,7 @@ impl Program {
                         unreachable!();
                     }
                 }
-                Insn::Yield {
-                    yieldReg: yield_reg,
-                    end_offset,
-                } => {
+                Insn::Yield { yieldReg: yield_reg, end_offset } => {
                     if let OwnedValue::Integer(pc) = programState.registers[*yield_reg] {
                         if programState.coroutineEnded {
                             programState.pc = *end_offset;
@@ -2537,11 +2087,10 @@ impl Program {
                 // Update: tablemoveto is used to travers on not exists, on insert depending on flags if nonseek it traverses again.
                 // If not there might be some optimizations obviously.
                 Insn::OpenWriteAsync { cursorId: cursor_id, rootPage: root_page } => {
-                    let cursor = Box::new(BTreeCursor::new(
-                        pager.clone(),
-                        *root_page,
-                        self.database_header.clone(),
-                    ));
+                    let cursor =
+                        Box::new(BTreeCursor::new(pager.clone(),
+                                                  *root_page,
+                                                  self.database_header.clone()));
                     cursorId2Cursor.insert(*cursor_id, cursor);
                     programState.pc += 1;
                 }
@@ -2558,14 +2107,10 @@ impl Program {
                 }
                 Insn::CreateBtree { db, root, flags: _ } => {
                     if *db > 0 {
-                        // TODO: implement temp datbases
                         todo!("temp databases not implemented yet");
                     }
-                    let mut cursor = Box::new(BTreeCursor::new(
-                        pager.clone(),
-                        0,
-                        self.database_header.clone(),
-                    ));
+
+                    let mut cursor = Box::new(BTreeCursor::new(pager.clone(), 0, self.database_header.clone()));
 
                     let root_page = cursor.btree_create(1);
                     programState.registers[*root] = OwnedValue::Integer(root_page as i64);
@@ -2582,10 +2127,7 @@ impl Program {
                         programState.pc += 1;
                     }
                 }
-                Insn::ParseSchema {
-                    db: _,
-                    where_clause,
-                } => {
+                Insn::ParseSchema { where_clause, .. } => {
                     let conn = self.conn.upgrade();
                     let conn = conn.as_ref().unwrap();
                     let stmt = conn.prepare(format!("SELECT * FROM  sqlite_schema WHERE {}", where_clause))?;
@@ -2645,15 +2187,13 @@ fn make_owned_record(registers: &[OwnedValue], start_reg: &usize, count: &usize)
 }
 
 fn trace_insn(program: &Program, addr: InsnReference, insn: &Insn) {
-    println!(
-        "{}",
-        explain::insn_to_str(
-            program,
-            addr,
-            insn,
-            String::new(),
-            program.comments.get(&(addr as BranchOffset)).copied()
-        )
+    println!("{}", explain::insn_to_str(
+        program,
+        addr,
+        insn,
+        String::new(),
+        program.comments.get(&(addr as BranchOffset)).copied()
+    )
     );
 }
 
@@ -2683,9 +2223,7 @@ fn get_indent_count(indent_count: usize, curr_insn: &Insn, prev_insn: Option<&In
     };
 
     match curr_insn {
-        Insn::NextAsync { .. } | Insn::SorterNext { .. } | Insn::PrevAsync { .. } => {
-            indent_count - 1
-        }
+        Insn::NextAsync { .. } | Insn::SorterNext { .. } | Insn::PrevAsync { .. } => indent_count - 1,
         _ => indent_count,
     }
 }
@@ -2699,9 +2237,7 @@ fn exec_lower(reg: &OwnedValue) -> Option<OwnedValue> {
 
 fn exec_length(reg: &OwnedValue) -> OwnedValue {
     match reg {
-        OwnedValue::Text(_) | OwnedValue::Integer(_) | OwnedValue::Float(_) => {
-            OwnedValue::Integer(reg.to_string().chars().count() as i64)
-        }
+        OwnedValue::Text(_) | OwnedValue::Integer(_) | OwnedValue::Float(_) => OwnedValue::Integer(reg.to_string().chars().count() as i64),
         OwnedValue::Blob(blob) => OwnedValue::Integer(blob.len() as i64),
         OwnedValue::Agg(aggctx) => exec_length(aggctx.final_value()),
         _ => reg.to_owned(),
@@ -2710,9 +2246,7 @@ fn exec_length(reg: &OwnedValue) -> OwnedValue {
 
 fn exec_octet_length(reg: &OwnedValue) -> OwnedValue {
     match reg {
-        OwnedValue::Text(_) | OwnedValue::Integer(_) | OwnedValue::Float(_) => {
-            OwnedValue::Integer(reg.to_string().into_bytes().len() as i64)
-        }
+        OwnedValue::Text(_) | OwnedValue::Integer(_) | OwnedValue::Float(_) => OwnedValue::Integer(reg.to_string().into_bytes().len() as i64),
         OwnedValue::Blob(blob) => OwnedValue::Integer(blob.len() as i64),
         OwnedValue::Agg(aggctx) => exec_octet_length(aggctx.final_value()),
         _ => reg.to_owned(),
@@ -2824,11 +2358,7 @@ pub fn exec_soundex(reg: &OwnedValue) -> OwnedValue {
     };
 
     // Remove numbers and spaces
-    let word: String = s
-        .chars()
-        .filter(|c| !c.is_digit(10))
-        .collect::<String>()
-        .replace(" ", "");
+    let word: String = s.chars().filter(|c| !c.is_digit(10)).collect::<String>().replace(" ", "");
     if word.is_empty() {
         return OwnedValue::Text(Rc::new("0000".to_string()));
     }
@@ -2848,14 +2378,10 @@ pub fn exec_soundex(reg: &OwnedValue) -> OwnedValue {
     let first_letter = word.chars().next().unwrap();
 
     // Remove all occurrences of 'h' and 'w' except the first letter
-    let code: String = word
-        .chars()
-        .skip(1)
-        .filter(|&ch| ch != 'h' && ch != 'w')
-        .fold(first_letter.to_string(), |mut acc, ch| {
-            acc.push(ch);
-            acc
-        });
+    let code: String = word.chars().skip(1).filter(|&ch| ch != 'h' && ch != 'w').fold(first_letter.to_string(), |mut acc, ch| {
+        acc.push(ch);
+        acc
+    });
 
     // Replace consonants with digits based on Soundex mapping
     let tmp: String = code.chars().map(|ch| match soundex_code(ch) {
@@ -2872,8 +2398,7 @@ pub fn exec_soundex(reg: &OwnedValue) -> OwnedValue {
     });
 
     // Remove all occurrences of a, e, i, o, u, y except the first letter
-    let mut result = tmp.chars().enumerate()
-        .filter(|(i, ch)| *i == 0 || !matches!(ch, 'a' | 'e' | 'i' | 'o' | 'u' | 'y')).map(|(_, ch)| ch).collect::<String>();
+    let mut result = tmp.chars().enumerate().filter(|(i, ch)| *i == 0 || !matches!(ch, 'a' | 'e' | 'i' | 'o' | 'u' | 'y')).map(|(_, ch)| ch).collect::<String>();
 
     // If the first symbol is a digit, replace it with the saved first letter
     if let Some(first_digit) = result.chars().next() {
@@ -2926,8 +2451,7 @@ fn exec_randomblob(reg: &OwnedValue) -> OwnedValue {
         OwnedValue::Float(f) => *f as i64,
         OwnedValue::Text(t) => t.parse().unwrap_or(1),
         _ => 1,
-    }
-        .max(1) as usize;
+    }.max(1) as usize;
 
     let mut blob: Vec<u8> = vec![0; length];
     getrandom::getrandom(&mut blob).expect("Failed to generate random blob");
@@ -3152,10 +2676,7 @@ fn exec_unhex(reg: &OwnedValue, ignored_chars: Option<&OwnedValue>) -> OwnedValu
 
 fn exec_unicode(reg: &OwnedValue) -> OwnedValue {
     match reg {
-        OwnedValue::Text(_)
-        | OwnedValue::Integer(_)
-        | OwnedValue::Float(_)
-        | OwnedValue::Blob(_) => {
+        OwnedValue::Text(_) | OwnedValue::Integer(_) | OwnedValue::Float(_) | OwnedValue::Blob(_) => {
             let text = reg.to_string();
             if let Some(first_char) = text.chars().next() {
                 OwnedValue::Integer(first_char as u32 as i64)

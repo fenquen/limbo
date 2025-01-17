@@ -24,7 +24,6 @@ use std::cell::Cell;
 use std::sync::Weak;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::{cell::RefCell, rc::Rc};
-#[cfg(feature = "fs")]
 use storage::FileStorage;
 use storage::page_cache::DumbLruPageCache;
 use storage::sqlite3_ondisk::{DbHeader, DB_HEADER_SIZE};
@@ -39,7 +38,6 @@ pub use error::LimboError;
 pub type Result<T> = std::result::Result<T, error::LimboError>;
 
 pub use io::OpenFlags;
-#[cfg(feature = "fs")]
 pub use io::PlatformIO;
 pub use io::{Buffer, CompletionEnum, File, MemoryIO, WriteCompletion, IO};
 pub use storage::buffer_pool::BufferPool;
@@ -73,7 +71,6 @@ pub struct Database {
 }
 
 impl Database {
-    #[cfg(feature = "fs")]
     pub fn openFile(io: Arc<dyn IO>, dbFilePath: &str) -> Result<Arc<Database>> {
         let dbFile = io.openFile(dbFilePath, OpenFlags::Create, true)?;
 

@@ -590,6 +590,7 @@ impl BTreeCursor {
                 if contents.cellCount() > 0 {
                     self.pageStack.set_cell_index(contents.cellCount() as i32 - 1);
                 }
+
                 return Ok(CursorResult::Ok(()));
             }
 
